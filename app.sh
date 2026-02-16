@@ -27,7 +27,7 @@ cat <<EOF > package.json
   "scripts": {
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
-    "generate:module": "./make-module.sh"
+    "generate:module": "./module.sh"
   },
   "dependencies": {
     "dotenv": "^16.3.1",
@@ -111,7 +111,7 @@ npm run dev
 
 ## 📦 Generate Module
 \`\`\`bash
-./make-module.sh <module-name>
+./module.sh <module-name>
 \`\`\`
 EOF
 
@@ -135,33 +135,12 @@ module.exports = {
   }
 };
 EOF
-
-cat <<EOF > src/config/db.config.js
-module.exports = {
-  uri: process.env.DB_URI,
-  options: {
-    maxPoolSize: parseInt(process.env.DB_POOL_SIZE) || 10,
-    minPoolSize: 2,
-    serverSelectionTimeoutMS: 5000,
-    socketTimeoutMS: 45000,
-  }
-};
-EOF
-
-cat <<EOF > src/config/redis.config.js
-module.exports = {
-  host: process.env.REDIS_HOST || 'localhost',
-  port: parseInt(process.env.REDIS_PORT) || 6379,
-  retryStrategy: (times) => Math.min(times * 50, 2000)
-};
-EOF
-
 # ---------------------------------------------------------
 # 5. Common - Database
 # ---------------------------------------------------------
 echo "🔌 Creating database connection..."
 
-cat <<EOF > src/common/database/mongoose.js
+cat <<EOF > src/common/database/DB.js
 const mongoose = require('mongoose');
 const dbConfig = require('../../config/db.config');
 
@@ -446,17 +425,17 @@ startServer();
 EOF
 
 # =========================================================
-# 12. بخش جادویی: تولید فایل make-module.sh
+# 12. بخش جادویی: تولید فایل module.sh
 # =========================================================
-echo "🔨 Creating make-module.sh tool..."
+echo "🔨 Creating module.sh tool..."
 
-cat <<'MAKER_EOF' > make-module.sh
+cat <<'MAKER_EOF' > module.sh
 #!/bin/bash
 MODULE_NAME=$1
 
 if [ -z "$MODULE_NAME" ]; then
-  echo "❌ Usage: ./make-module.sh <module_name>"
-  echo "Example: ./make-module.sh users"
+  echo "❌ Usage: ./module.sh <module_name>"
+  echo "Example: ./module.sh users"
   exit 1
 fi
 
@@ -472,29 +451,26 @@ fi
 mkdir -p "$DIR/middlewares"
 echo "🚀 Creating module: $MODULE_NAME..."
 
-# 1. Model (Mongoose Schema)
-cat <<EOD > "$DIR/$MODULE_NAME.model.js"
-const mongoose = require('mongoose');
+# 1. DTO (Data Transfer Object / Validation)
+cat <<EOD > "$DIR/$MODULE_NAME.dto.js"
+const Joi = require('joi');
 
-const ${MODULE_NAME}Schema = new mongoose.Schema({
-  title: {
-    type: String,
-    required: true,
-    trim: true
-  },
-  description: {
-    type: String,
-    trim: true
-  },
-  isActive: {
-    type: Boolean,
-    default: true
-  }
-}, {
-  timestamps: true
+const create${CAP_NAME}Dto = Joi.object({
+  title: Joi.string().required().min(3).max(100),
+  description: Joi.string().optional().max(500),
+  isActive: Joi.boolean().optional()
 });
 
-module.exports = mongoose.model('${CAP_NAME}', ${MODULE_NAME}Schema);
+const update${CAP_NAME}Dto = Joi.object({
+  title: Joi.string().optional().min(3).max(100),
+  description: Joi.string().optional().max(500),
+  isActive: Joi.boolean().optional()
+});
+
+module.exports = {
+  create${CAP_NAME}Dto,
+  update${CAP_NAME}Dto
+};
 EOD
 
 # 2. Repository (Database Access Layer)
@@ -735,33 +711,20 @@ const controller = require('./${MODULE_NAME}.controller');
 const { authenticate } = require('../../common/middlewares/auth');
 const validate = require('../../common/middlewares/validate');
 const { check${CAP_NAME}Exists } = require('./middlewares/${MODULE_NAME}.middleware');
-const Joi = require('joi');
-
-// Validation Schema
-const create${CAP_NAME}Schema = Joi.object({
-  title: Joi.string().required().min(3).max(100),
-  description: Joi.string().optional().max(500),
-  isActive: Joi.boolean().optional()
-});
-
-const update${CAP_NAME}Schema = Joi.object({
-  title: Joi.string().optional().min(3).max(100),
-  description: Joi.string().optional().max(500),
-  isActive: Joi.boolean().optional()
-});
+const { create${CAP_NAME}Dto, update${CAP_NAME}Dto } = require('./${MODULE_NAME}.dto');
 
 // Routes
 router.get('/', controller.getAll);
 router.get('/:id', check${CAP_NAME}Exists, controller.getById);
-router.post('/', validate(create${CAP_NAME}Schema), controller.create);
-router.put('/:id', check${CAP_NAME}Exists, validate(update${CAP_NAME}Schema), controller.update);
+router.post('/', validate(create${CAP_NAME}Dto), controller.create);
+router.put('/:id', check${CAP_NAME}Exists, validate(update${CAP_NAME}Dto), controller.update);
 router.delete('/:id', check${CAP_NAME}Exists, controller.delete);
 
 module.exports = router;
 EOD
 
 # 7. Index (Module Export)
-cat <<EOD > "$DIR/index.js"
+cat <<EOD > "$DIR/$MODULE_NAME.js"
 module.exports = require('./${MODULE_NAME}.routes');
 EOD
 
@@ -776,14 +739,15 @@ echo "   ├── ${MODULE_NAME}.controller.js    (HTTP Layer)"
 echo "   ├── ${MODULE_NAME}.routes.js        (Routes)"
 echo "   ├── middlewares/"
 echo "   │   └── ${MODULE_NAME}.middleware.js (Custom Middleware)"
-echo "   └── index.js                        (Module Export)"
+echo "   └── ${MODULE_NAME}.js                        (Module Export)"
 echo ""
 echo "📝 Next steps:"
 echo "   1. Add to src/modules/index.js:"
 echo "      const ${MODULE_NAME}Routes = require('./${MODULE_NAME}');"
 echo "      router.use('/${MODULE_NAME}', ${MODULE_NAME}Routes);"
 echo ""
-echo "   2. Test your endpoints:"
+echo "   2. Test your endpoidto.js           (Validation DTO)"
+echo "   ├── ${MODULE_NAME}.nts:"
 echo "      GET    /api/v1/${MODULE_NAME}"
 echo "      GET    /api/v1/${MODULE_NAME}/:id"
 echo "      POST   /api/v1/${MODULE_NAME}"
@@ -792,7 +756,7 @@ echo "      DELETE /api/v1/${MODULE_NAME}/:id"
 echo ""
 MAKER_EOF
 
-chmod +x make-module.sh
+chmod +x module.sh
 
 # ---------------------------------------------------------
 # 13. نصب پکیج‌ها
@@ -817,5 +781,5 @@ echo "   cd $PROJECT_NAME"
 echo "   npm run dev"
 echo ""
 echo "📦 Create Module:"
-echo "   ./make-module.sh users"
+echo "   ./module.sh users"
 echo ""
