@@ -23,16 +23,16 @@ cat <<EOF > package.json
   "name": "$PROJECT_NAME",
   "version": "1.0.0",
   "description": "Modular Express App with Clean Architecture",
-  "main": "src/server.js",
+  "main": "src/bootstrap/server.js",
   "scripts": {
-    "start": "node src/server.js",
-    "dev": "nodemon src/server.js",
+    "start": "node src/bootstrap/server.js",
+    "dev": "nodemon src/bootstrap/server.js",
     "generate:module": "./module.sh"
   },
   "dependencies": {
     "dotenv": "^16.3.1",
     "express": "^4.18.2",
-    "mongoose": "^8.0.0",
+    "pg": "^8.11.3",
     "redis": "^4.6.0",
     "bcryptjs": "^2.4.3",
     "jsonwebtoken": "^9.0.2",
@@ -51,12 +51,18 @@ EOF
 # 3. ساختار پوشه‌ها
 # ---------------------------------------------------------
 echo "📂 Creating directories..."
+mkdir -p src/bootstrap
+mkdir -p src/http
+mkdir -p src/app
 mkdir -p src/config
-mkdir -p src/common/database
-mkdir -p src/common/redis
-mkdir -p src/common/middlewares
-mkdir -p src/common/utils
-mkdir -p src/modules
+mkdir -p src/infrastructure/db/postgres
+mkdir -p src/infrastructure/db/redis
+mkdir -p src/infrastructure/queue
+mkdir -p src/infrastructure/dispatch
+mkdir -p src/modules/users
+mkdir -p src/modules/auth
+mkdir -p src/modules/health
+mkdir -p src/shared
 
 echo "⚙️ Config files..."
 cat <<EOF > .gitignore
@@ -71,9 +77,17 @@ cat <<EOF > .env
 PORT=3000
 NODE_ENV=development
 
-# Database
-DB_URI=mongodb://localhost:27017/$PROJECT_NAME
-DB_POOL_SIZE=10
+# PostgreSQL
+PG_HOST=localhost
+PG_PORT=5432
+PG_DATABASE=$PROJECT_NAME
+PG_USER=postgres
+PG_PASSWORD=postgres
+PG_POOL_MAX=20
+PG_POOL_IDLE_TIMEOUT=30000
+PG_POOL_CONNECTION_TIMEOUT=2000
+PG_STATEMENT_TIMEOUT=30000
+PG_SLOW_QUERY_THRESHOLD=1000
 
 # Redis
 REDIS_HOST=localhost
@@ -87,40 +101,38 @@ JWT_EXPIRES_IN=7d
 API_PREFIX=/api/v1
 EOF
 
-cat <<EOF > README.md
-# $PROJECT_NAME
+# ---------------------------------------------------------
+# 4. Config - PostgreSQL
+# ---------------------------------------------------------
+echo "⚙️ Creating config/pg.config.js..."
+cat <<EOF > src/config/pg.config.js
+require('dotenv').config();
 
-## 📁 Project Structure
-\`\`\`
-Back-End/
-├── .env
-├── package.json
-└── src/
-    ├── config/           # ⚙️ تنظیمات
-    ├── common/           # 🏗️ زیرساخت مشترک
-    ├── modules/          # 📦 ماژول‌های بیزنس
-    ├── app.js            # 🔌 Express Setup
-    └── server.js         # 🚀 Server Entry
-\`\`\`
-
-## 🚀 Usage
-\`\`\`bash
-npm install
-npm run dev
-\`\`\`
-
-## 📦 Generate Module
-\`\`\`bash
-./module.sh <module-name>
-\`\`\`
+module.exports = {
+  connection: {
+    host:     process.env.PG_HOST     || 'localhost',
+    port:     parseInt(process.env.PG_PORT) || 5432,
+    database: process.env.PG_DATABASE || 'mydb',
+    user:     process.env.PG_USER     || 'postgres',
+    password: process.env.PG_PASSWORD || 'postgres',
+  },
+  pool: {
+    max:               parseInt(process.env.PG_POOL_MAX)                || 20,
+    idleTimeoutMillis: parseInt(process.env.PG_POOL_IDLE_TIMEOUT)       || 30000,
+    connectionTimeoutMillis: parseInt(process.env.PG_POOL_CONNECTION_TIMEOUT) || 2000,
+  },
+  query: {
+    statement_timeout:  parseInt(process.env.PG_STATEMENT_TIMEOUT)      || 30000,
+    slowQueryThreshold: parseInt(process.env.PG_SLOW_QUERY_THRESHOLD)   || 1000,
+  },
+};
 EOF
 
 # ---------------------------------------------------------
-# 4. Config Files
+# 5. Infrastructure - Env
 # ---------------------------------------------------------
-echo "⚙️ Creating config files..."
-
-cat <<EOF > src/config/index.js
+echo "⚙️ Creating infrastructure/env.js..."
+cat <<EOF > src/infrastructure/env.js
 require('dotenv').config();
 
 module.exports = {
@@ -135,123 +147,17 @@ module.exports = {
   }
 };
 EOF
-# ---------------------------------------------------------
-# 5. Common - Database
-# ---------------------------------------------------------
-echo "🔌 Creating database connection..."
-
-cat <<EOF > src/common/database/DB.js
-const mongoose = require('mongoose');
-const dbConfig = require('../../config/db.config');
-
-const connectDB = async () => {
-  try {
-    await mongoose.connect(dbConfig.uri, dbConfig.options);
-    console.log('✅ MongoDB Connected');
-  } catch (error) {
-    console.error('❌ MongoDB Connection Error:', error.message);
-    process.exit(1);
-  }
-};
-
-mongoose.connection.on('disconnected', () => {
-  console.log('⚠️  MongoDB Disconnected');
-});
-
-module.exports = connectDB;
-EOF
 
 # ---------------------------------------------------------
-# 6. Common - Redis
+# 6. Infrastructure - Config (placeholder)
 # ---------------------------------------------------------
-echo "🔌 Creating redis client..."
-
-cat <<EOF > src/common/redis/client.js
-const redis = require('redis');
-const redisConfig = require('../../config/redis.config');
-
-let client = null;
-
-const connectRedis = async () => {
-  try {
-    client = redis.createClient(redisConfig);
-    
-    client.on('error', (err) => console.error('❌ Redis Error:', err));
-    client.on('connect', () => console.log('✅ Redis Connected'));
-    
-    await client.connect();
-    return client;
-  } catch (error) {
-    console.error('❌ Redis Connection Error:', error.message);
-  }
-};
-
-const getRedisClient = () => client;
-
-module.exports = { connectRedis, getRedisClient };
-EOF
+touch src/infrastructure/config.js
 
 # ---------------------------------------------------------
-# 7. Common - Middlewares
+# 7. Infrastructure - Logger
 # ---------------------------------------------------------
-echo "🛡️ Creating common middlewares..."
-
-cat <<EOF > src/common/middlewares/auth.js
-const jwt = require('jsonwebtoken');
-const config = require('../../config');
-
-const authenticate = (req, res, next) => {
-  try {
-    const token = req.headers.authorization?.split(' ')[1];
-    
-    if (!token) {
-      return res.status(401).json({ 
-        success: false, 
-        message: 'Authentication required' 
-      });
-    }
-
-    const decoded = jwt.verify(token, config.jwt.secret);
-    req.user = decoded;
-    next();
-  } catch (error) {
-    return res.status(401).json({ 
-      success: false, 
-      message: 'Invalid or expired token' 
-    });
-  }
-};
-
-module.exports = { authenticate };
-EOF
-
-cat <<EOF > src/common/middlewares/error.js
-const errorHandler = (err, req, res, next) => {
-  console.error('💥 Error:', err);
-
-  const statusCode = err.statusCode || 500;
-  const message = err.message || 'Internal Server Error';
-
-  res.status(statusCode).json({
-    success: false,
-    error: {
-      message,
-      ...(process.env.NODE_ENV === 'development' && { stack: err.stack })
-    }
-  });
-};
-
-const notFoundHandler = (req, res) => {
-  res.status(404).json({
-    success: false,
-    message: 'Route not found'
-  });
-};
-
-module.exports = { errorHandler, notFoundHandler };
-EOF
-
-cat <<EOF > src/common/middlewares/logger.js
+echo "📋 Creating infrastructure/logger.js..."
+cat <<EOF > src/infrastructure/logger.js
 const morgan = require('morgan');
 
 const logger = morgan(':method :url :status :res[content-length] - :response-time ms');
@@ -259,30 +165,488 @@ const logger = morgan(':method :url :status :res[content-length] - :response-tim
 module.exports = logger;
 EOF
 
-cat <<EOF > src/common/middlewares/validate.js
-const validate = (schema) => (req, res, next) => {
-  const { error } = schema.validate(req.body, { abortEarly: false });
-  
-  if (error) {
-    return res.status(400).json({
-      success: false,
-      message: 'Validation error',
-      errors: error.details.map(d => d.message)
-    });
+# ---------------------------------------------------------
+# 8. Infrastructure - DB - PostgreSQL errors
+# ---------------------------------------------------------
+echo "🔌 Creating infrastructure/db/postgres/errors.js..."
+cat <<EOF > src/infrastructure/db/postgres/errors.js
+class DatabaseError extends Error {
+  constructor(message, code, original) {
+    super(message);
+    this.name = 'DatabaseError';
+    this.code = code;
+    this.original = original;
   }
-  
-  next();
+}
+
+class ConnectionError extends Error {
+  constructor(message, original) {
+    super(message);
+    this.name = 'ConnectionError';
+    this.original = original;
+  }
+}
+
+class QueryError extends Error {
+  constructor(message, code, original) {
+    super(message);
+    this.name = 'QueryError';
+    this.code = code;
+    this.original = original;
+  }
+}
+
+class UniqueViolationError extends DatabaseError {
+  constructor(message, original) {
+    super(message, '23505', original);
+    this.name = 'UniqueViolationError';
+  }
+}
+
+class ForeignKeyViolationError extends DatabaseError {
+  constructor(message, original) {
+    super(message, '23503', original);
+    this.name = 'ForeignKeyViolationError';
+  }
+}
+
+class NotNullViolationError extends DatabaseError {
+  constructor(message, original) {
+    super(message, '23502', original);
+    this.name = 'NotNullViolationError';
+  }
+}
+
+/**
+ * Normalize raw pg errors into structured domain errors
+ * @param {Error} error - Raw pg error
+ * @returns {DatabaseError|QueryError|ConnectionError|Error}
+ */
+const normalizeError = (error) => {
+  switch (error.code) {
+    case '23505':
+      return new UniqueViolationError(
+        \`Unique constraint violated: \${error.detail || error.message}\`,
+        error
+      );
+    case '23503':
+      return new ForeignKeyViolationError(
+        \`Foreign key constraint violated: \${error.detail || error.message}\`,
+        error
+      );
+    case '23502':
+      return new NotNullViolationError(
+        \`Not null constraint violated: \${error.detail || error.message}\`,
+        error
+      );
+    case 'ECONNREFUSED':
+    case '08006':
+    case '08001':
+    case '08004':
+      return new ConnectionError(
+        \`Database connection failed: \${error.message}\`,
+        error
+      );
+    case '42601':
+      return new QueryError(
+        \`SQL syntax error: \${error.message}\`,
+        error.code,
+        error
+      );
+    case '42703':
+      return new QueryError(
+        \`Column does not exist: \${error.message}\`,
+        error.code,
+        error
+      );
+    case '42P01':
+      return new QueryError(
+        \`Table does not exist: \${error.message}\`,
+        error.code,
+        error
+      );
+    default:
+      return new DatabaseError(
+        error.message || 'Unknown database error',
+        error.code,
+        error
+      );
+  }
 };
 
-module.exports = validate;
+module.exports = {
+  normalizeError,
+  DatabaseError,
+  ConnectionError,
+  QueryError,
+  UniqueViolationError,
+  ForeignKeyViolationError,
+  NotNullViolationError,
+};
 EOF
 
 # ---------------------------------------------------------
-# 8. Common - Utils
+# 9. Infrastructure - DB - PostgreSQL pg.js
 # ---------------------------------------------------------
-echo "🛠️ Creating utils..."
+echo "🔌 Creating infrastructure/db/postgres/pg.js..."
+cat <<'EOF' > src/infrastructure/db/postgres/pg.js
+/**
+ * High-Performance PostgreSQL Database Wrapper
+ * Simple API: db.execute() and db.Transaction()
+ */
 
-cat <<EOF > src/common/utils/response.js
+const { Pool } = require("pg");
+const pgConfig = require("../../../config/pg.config");
+const { normalizeError } = require("./errors");
+
+class Database {
+  constructor() {
+    this.pool = null;
+  }
+
+  async init() {
+    if (this.pool) return this.pool;
+
+    try {
+      this.pool = new Pool({
+        ...pgConfig.connection,
+        ...pgConfig.pool,
+      });
+
+      this.pool.on("connect", (client) => {
+        client.query(
+          `SET statement_timeout = ${pgConfig.query.statement_timeout}`,
+        );
+      });
+
+      this.pool.on("error", (err) => {
+        console.error("💥 Unexpected database pool error:", err);
+      });
+
+      const client = await this.pool.connect();
+      try {
+        await client.query("SELECT NOW()");
+        console.log("✅ PostgreSQL Pool Connected");
+      } finally {
+        client.release();
+      }
+
+      return this.pool;
+    } catch (error) {
+      console.error("❌ PostgreSQL Pool Connection Error:", error.message);
+      throw normalizeError(error);
+    }
+  }
+
+  async close() {
+    if (this.pool) {
+      await this.pool.end();
+      this.pool = null;
+      console.log("✅ PostgreSQL Pool Closed");
+    }
+  }
+
+  ensurePool() {
+    if (!this.pool) {
+      throw new Error("Database pool not initialized. Call db.init() first.");
+    }
+  }
+
+  /**
+   * Build query object
+   * @param {string} sql - SQL query template
+   * @param  {...any} params - Query parameters
+   * @returns {Object} Query object { text, values }
+   */
+  Transaction(sql, ...params) {
+    return {
+      text: sql,
+      values:
+        params.length === 1 && Array.isArray(params[0]) ? params[0] : params,
+    };
+  }
+
+  /**
+   * Execute simple query (for SELECT)
+   * @param {Object|string} query - Query object or SQL string
+   * @param {Array} args - Query arguments (if query is string)
+   * @returns {Promise<Array>} Query results
+   */
+  async execute(query, args = []) {
+    this.ensurePool();
+
+    const sql = typeof query === "string" ? query : query.text;
+    const values = typeof query === "string" ? args : query.values;
+
+    const startTime = Date.now();
+
+    try {
+      const result = await this.pool.query(sql, values);
+      const executionTime = Date.now() - startTime;
+
+      if (executionTime > pgConfig.query.slowQueryThreshold) {
+        console.warn(`🐌 Slow Query Detected (${executionTime}ms):`, {
+          query: sql.substring(0, 100),
+          executionTime,
+          rowCount: result.rowCount,
+        });
+      }
+
+      return result.rows || [];
+    } catch (error) {
+      const executionTime = Date.now() - startTime;
+
+      console.error("💥 Query Execution Error:", {
+        error: error.message,
+        query: sql.substring(0, 100),
+        executionTime,
+        code: error.code,
+      });
+
+      throw normalizeError(error);
+    }
+  }
+
+  /**
+   * Execute transaction for complex operations with multiple queries
+   * @param {Function} callback - Callback receives executeInTx(queryObj)
+   * @returns {Promise<any>} Transaction result
+   *
+   * @example
+   * await db.executeTransaction(async (executeInTx) => {
+   *   const user = await executeInTx(db.Transaction(qry.findUser, userId));
+   *   if (user.length === 0) throw new Error('Not found');
+   *
+   *   await executeInTx(db.Transaction(qry.updateBalance, userId, newBalance));
+   *   await executeInTx(db.Transaction(qry.insertLog, userId, 'update'));
+   *   return user[0];
+   * });
+   */
+  async executeTransaction(callback) {
+    this.ensurePool();
+
+    const client = await this.pool.connect();
+    let hasError = false;
+
+    try {
+      await client.query(
+        `SET statement_timeout = ${pgConfig.query.statement_timeout}`,
+      );
+      await client.query("BEGIN");
+
+      const executeInTx = async (queryObj) => {
+        const sql = typeof queryObj === "string" ? queryObj : queryObj.text;
+        const values = typeof queryObj === "string" ? [] : queryObj.values;
+
+        const startTime = Date.now();
+
+        try {
+          const result = await client.query(sql, values);
+          const executionTime = Date.now() - startTime;
+
+          if (executionTime > pgConfig.query.slowQueryThreshold) {
+            console.warn(`🐌 Slow Query in TX (${executionTime}ms):`, {
+              query: sql.substring(0, 100),
+              executionTime,
+              rowCount: result.rowCount,
+            });
+          }
+
+          return result.rows || [];
+        } catch (error) {
+          const executionTime = Date.now() - startTime;
+
+          console.error("💥 TX Query Error:", {
+            error: error.message,
+            query: sql.substring(0, 100),
+            executionTime,
+            code: error.code,
+          });
+
+          throw normalizeError(error);
+        }
+      };
+
+      const result = await callback(executeInTx);
+      await client.query("COMMIT");
+
+      return result;
+    } catch (error) {
+      hasError = true;
+
+      try {
+        await client.query("ROLLBACK");
+      } catch (rollbackError) {
+        console.error("💥 ROLLBACK failed:", rollbackError.message);
+      }
+
+      if (error.name && error.name.endsWith("Error") && error.code) {
+        throw error;
+      }
+      throw normalizeError(error);
+    } finally {
+      client.release(hasError);
+    }
+  }
+}
+
+module.exports = new Database();
+EOF
+
+# ---------------------------------------------------------
+# 10. Infrastructure - DB - Redis
+# ---------------------------------------------------------
+echo "🔌 Creating infrastructure/db/redis/client.js..."
+cat <<EOF > src/infrastructure/db/redis/client.js
+const redis = require('redis');
+
+let client = null;
+
+const connectRedis = async () => {
+  try {
+    client = redis.createClient({
+      socket: {
+        host: process.env.REDIS_HOST || 'localhost',
+        port: parseInt(process.env.REDIS_PORT) || 6379,
+      }
+    });
+
+    client.on('error',     (err) => console.error('❌ Redis Error:', err));
+    client.on('connect',   ()    => console.log('✅ Redis Connected'));
+    client.on('reconnecting', () => console.warn('⚠️  Redis Reconnecting...'));
+
+    await client.connect();
+    return client;
+  } catch (error) {
+    console.error('❌ Redis Connection Error:', error.message);
+    throw error;
+  }
+};
+
+const getClient = () => {
+  if (!client) {
+    throw new Error('Redis client not initialized. Call connectRedis() first.');
+  }
+  return client;
+};
+
+const closeRedis = async () => {
+  if (client) {
+    await client.quit();
+    client = null;
+    console.log('✅ Redis Connection Closed');
+  }
+};
+
+module.exports = { connectRedis, getClient, closeRedis };
+EOF
+
+# ---------------------------------------------------------
+# 11. Infrastructure - Queue
+# ---------------------------------------------------------
+echo "📨 Creating infrastructure/queue..."
+touch src/infrastructure/queue/client.js
+touch src/infrastructure/queue/producer.js
+touch src/infrastructure/queue/consumer.js
+
+# ---------------------------------------------------------
+# 12. Infrastructure - Dispatch
+# ---------------------------------------------------------
+echo "📡 Creating infrastructure/dispatch..."
+touch src/infrastructure/dispatch/bus.js
+touch src/infrastructure/dispatch/registry.js
+
+# ---------------------------------------------------------
+# 13. HTTP Layer
+# ---------------------------------------------------------
+echo "🛡️ Creating http layer..."
+
+cat <<EOF > src/http/middlewares.js
+const jwt = require('jsonwebtoken');
+const config = require('../infrastructure/env');
+
+class Middlewares {
+  auth(req, res, next) {
+    try {
+      const token = req.headers.authorization?.split(' ')[1];
+
+      if (!token) {
+        return res.status(401).json({
+          success: false,
+          message: 'Authentication required'
+        });
+      }
+
+      const decoded = jwt.verify(token, config.jwt.secret);
+      req.user = decoded;
+      next();
+    } catch (error) {
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid or expired token'
+      });
+    }
+  }
+
+  validate(schema) {
+    return (req, res, next) => {
+      const { error } = schema.validate(req.body, { abortEarly: false });
+
+      if (error) {
+        return res.status(400).json({
+          success: false,
+          message: 'Validation error',
+          errors: error.details.map(d => d.message)
+        });
+      }
+
+      next();
+    };
+  }
+
+  errorHandler(err, req, res, next) {
+    console.error('💥 Error:', err);
+
+    const statusCode = err.statusCode || 500;
+    const message = err.message || 'Internal Server Error';
+
+    res.status(statusCode).json({
+      success: false,
+      error: {
+        message,
+        ...(process.env.NODE_ENV === 'development' && { stack: err.stack })
+      }
+    });
+  }
+
+  notFound(req, res) {
+    res.status(404).json({
+      success: false,
+      message: 'Route not found'
+    });
+  }
+}
+
+module.exports = new Middlewares();
+EOF
+
+touch src/http/errors.js
+touch src/http/response.js
+
+# ---------------------------------------------------------
+# 14. App Layer
+# ---------------------------------------------------------
+echo "🧩 Creating app layer..."
+touch src/app/config.js
+touch src/app/dispatch.js
+touch src/app/container.js
+
+# ---------------------------------------------------------
+# 15. Shared
+# ---------------------------------------------------------
+echo "🛠️ Creating shared utilities..."
+
+cat <<EOF > src/shared/utils.js
 class ApiResponse {
   static success(res, data, message = 'Success', statusCode = 200) {
     return res.status(statusCode).json({
@@ -307,7 +671,7 @@ class ApiResponse {
 module.exports = ApiResponse;
 EOF
 
-cat <<EOF > src/common/utils/date-util.js
+cat <<EOF > src/shared/time.js
 const formatDate = (date) => {
   return new Date(date).toISOString();
 };
@@ -321,18 +685,30 @@ const addDays = (date, days) => {
 module.exports = { formatDate, addDays };
 EOF
 
-# ---------------------------------------------------------
-# 9. Modules - Index (Main Aggregator)
-# ---------------------------------------------------------
-echo "🌟 Creating modules aggregator..."
+touch src/shared/validate.js
+touch src/shared/id.js
+touch src/shared/errors.js
 
-cat <<EOF > src/modules/index.js
+# ---------------------------------------------------------
+# 16. Modules (single-file class-based)
+# ---------------------------------------------------------
+echo "📦 Creating module stubs..."
+touch src/modules/users/users.module.js
+touch src/modules/auth/auth.module.js
+touch src/modules/health/health.module.js
+
+# ---------------------------------------------------------
+# 17. Bootstrap - Router
+# ---------------------------------------------------------
+echo "🌟 Creating bootstrap/router.js..."
+cat <<EOF > src/bootstrap/router.js
 const express = require('express');
 const router = express.Router();
 
-// Import all module routes here
-// Example: const usersRoutes = require('./users');
-// router.use('/users', usersRoutes);
+// Mount module routers here
+// Example:
+// const UsersModule = require('../modules/users/users.module');
+// router.use('/users', new UsersModule().router);
 
 router.get('/health', (req, res) => {
   res.json({ success: true, message: 'API is running' });
@@ -342,18 +718,17 @@ module.exports = router;
 EOF
 
 # ---------------------------------------------------------
-# 10. App.js - Express Setup
+# 18. Bootstrap - App.js
 # ---------------------------------------------------------
-echo "🔌 Creating app.js..."
-
-cat <<EOF > src/app.js
+echo "🔌 Creating bootstrap/app.js..."
+cat <<EOF > src/bootstrap/app.js
 const express = require('express');
 const helmet = require('helmet');
 const cors = require('cors');
-const config = require('./config');
-const logger = require('./common/middlewares/logger');
-const { errorHandler, notFoundHandler } = require('./common/middlewares/error');
-const moduleRoutes = require('./modules');
+const config = require('../infrastructure/env');
+const logger = require('../infrastructure/logger');
+const middlewares = require('../http/middlewares');
+const router = require('./router');
 
 const app = express();
 
@@ -369,31 +744,30 @@ if (config.server.env === 'development') {
 }
 
 // API Routes
-app.use(config.server.apiPrefix, moduleRoutes);
+app.use(config.server.apiPrefix, router);
 
 // Error Handling
-app.use(notFoundHandler);
-app.use(errorHandler);
+app.use(middlewares.notFound);
+app.use(middlewares.errorHandler);
 
 module.exports = app;
 EOF
 
 # ---------------------------------------------------------
-# 11. Server.js - Entry Point
+# 19. Bootstrap - Server.js
 # ---------------------------------------------------------
-echo "🚀 Creating server.js..."
-
-cat <<EOF > src/server.js
+echo "🚀 Creating bootstrap/server.js..."
+cat <<EOF > src/bootstrap/server.js
 const app = require('./app');
-const config = require('./config');
-const connectDB = require('./common/database/mongoose');
-const { connectRedis } = require('./common/redis/client');
+const config = require('../infrastructure/env');
+const db = require('../infrastructure/db/postgres/pg');
+const { connectRedis } = require('../infrastructure/db/redis/client');
 
 const startServer = async () => {
   try {
-    // Connect to Database
-    await connectDB();
-    
+    // Connect to PostgreSQL
+    await db.init();
+
     // Connect to Redis (Optional)
     try {
       await connectRedis();
@@ -415,7 +789,6 @@ const startServer = async () => {
   }
 };
 
-// Handle Unhandled Rejection
 process.on('unhandledRejection', (err) => {
   console.error('💥 Unhandled Rejection:', err);
   process.exit(1);
@@ -425,7 +798,7 @@ startServer();
 EOF
 
 # =========================================================
-# 12. بخش جادویی: تولید فایل module.sh
+# 20. تولید فایل module.sh
 # =========================================================
 echo "🔨 Creating module.sh tool..."
 
@@ -439,112 +812,72 @@ if [ -z "$MODULE_NAME" ]; then
   exit 1
 fi
 
-# Capitalize first letter (user -> User)
 CAP_NAME="$(tr '[:lower:]' '[:upper:]' <<< ${MODULE_NAME:0:1})${MODULE_NAME:1}"
 DIR="src/modules/$MODULE_NAME"
 
-if [ -d "$DIR" ]; then 
+if [ -d "$DIR" ]; then
   echo "❌ Module '$MODULE_NAME' already exists!"
   exit 1
 fi
 
-mkdir -p "$DIR/middlewares"
+mkdir -p "$DIR"
 echo "🚀 Creating module: $MODULE_NAME..."
 
-# 1. DTO (Data Transfer Object / Validation)
-cat <<EOD > "$DIR/$MODULE_NAME.dto.js"
-const Joi = require('joi');
+cat <<EOD > "$DIR/$MODULE_NAME.module.js"
+const express = require('express');
+const ApiResponse = require('../../shared/utils');
+const middlewares = require('../../http/middlewares');
+const db = require('../../infrastructure/db/postgres/pg');
 
-const create${CAP_NAME}Dto = Joi.object({
-  title: Joi.string().required().min(3).max(100),
-  description: Joi.string().optional().max(500),
-  isActive: Joi.boolean().optional()
-});
-
-const update${CAP_NAME}Dto = Joi.object({
-  title: Joi.string().optional().min(3).max(100),
-  description: Joi.string().optional().max(500),
-  isActive: Joi.boolean().optional()
-});
-
-module.exports = {
-  create${CAP_NAME}Dto,
-  update${CAP_NAME}Dto
+// ── Queries ──────────────────────────────────────────────
+const qry = {
+  findAll:  'SELECT * FROM ${MODULE_NAME}s ORDER BY created_at DESC LIMIT \$1 OFFSET \$2',
+  findById: 'SELECT * FROM ${MODULE_NAME}s WHERE id = \$1',
+  create:   'INSERT INTO ${MODULE_NAME}s (title, description) VALUES (\$1, \$2) RETURNING *',
+  update:   'UPDATE ${MODULE_NAME}s SET title = \$1, description = \$2 WHERE id = \$3 RETURNING *',
+  delete:   'DELETE FROM ${MODULE_NAME}s WHERE id = \$1 RETURNING id',
 };
-EOD
 
-# 2. Repository (Database Access Layer)
-cat <<EOD > "$DIR/$MODULE_NAME.repository.js"
-const ${CAP_NAME}Model = require('./${MODULE_NAME}.model');
-
+// ── Repository ───────────────────────────────────────────
 class ${CAP_NAME}Repository {
-  async findAll(filters = {}, options = {}) {
-    const { page = 1, limit = 10, sort = '-createdAt' } = options;
-    const skip = (page - 1) * limit;
-
-    const items = await ${CAP_NAME}Model
-      .find(filters)
-      .sort(sort)
-      .skip(skip)
-      .limit(limit);
-
-    const total = await ${CAP_NAME}Model.countDocuments(filters);
-
-    return {
-      items,
-      pagination: {
-        total,
-        page,
-        limit,
-        pages: Math.ceil(total / limit)
-      }
-    };
+  async findAll(limit = 10, offset = 0) {
+    return await db.execute(qry.findAll, [limit, offset]);
   }
 
   async findById(id) {
-    return await ${CAP_NAME}Model.findById(id);
-  }
-
-  async findOne(conditions) {
-    return await ${CAP_NAME}Model.findOne(conditions);
+    const rows = await db.execute(qry.findById, [id]);
+    return rows[0] || null;
   }
 
   async create(data) {
-    const item = new ${CAP_NAME}Model(data);
-    return await item.save();
+    const rows = await db.execute(qry.create, [data.title, data.description]);
+    return rows[0];
   }
 
   async update(id, data) {
-    return await ${CAP_NAME}Model.findByIdAndUpdate(
-      id,
-      { \$set: data },
-      { new: true, runValidators: true }
-    );
+    const rows = await db.execute(qry.update, [data.title, data.description, id]);
+    return rows[0] || null;
   }
 
   async delete(id) {
-    return await ${CAP_NAME}Model.findByIdAndDelete(id);
-  }
-
-  async exists(conditions) {
-    return await ${CAP_NAME}Model.exists(conditions);
+    const rows = await db.execute(qry.delete, [id]);
+    return rows[0] || null;
   }
 }
 
-module.exports = new ${CAP_NAME}Repository();
-EOD
-
-# 3. Service (Business Logic)
-cat <<EOD > "$DIR/$MODULE_NAME.service.js"
-const ${MODULE_NAME}Repository = require('./${MODULE_NAME}.repository');
-
+// ── Service ──────────────────────────────────────────────
 class ${CAP_NAME}Service {
-  async getAll(filters = {}, options = {}) {
-    return await ${MODULE_NAME}Repository.findAll(filters, options);
+  constructor() {
+    this.repo = new ${CAP_NAME}Repository();
+  }
+
+  async getAll(page = 1, limit = 10) {
+    const offset = (page - 1) * limit;
+    return await this.repo.findAll(limit, offset);
   }
 
   async getById(id) {
-    const item = await ${MODULE_NAME}Repository.findById(id);
+    const item = await this.repo.findById(id);
     if (!item) {
       const error = new Error('${CAP_NAME} not found');
       error.statusCode = 404;
@@ -554,19 +887,11 @@ class ${CAP_NAME}Service {
   }
 
   async create(data) {
-    // Business logic here (e.g., check duplicates)
-    const exists = await ${MODULE_NAME}Repository.exists({ title: data.title });
-    if (exists) {
-      const error = new Error('${CAP_NAME} with this title already exists');
-      error.statusCode = 409;
-      throw error;
-    }
-
-    return await ${MODULE_NAME}Repository.create(data);
+    return await this.repo.create(data);
   }
 
   async update(id, data) {
-    const item = await ${MODULE_NAME}Repository.update(id, data);
+    const item = await this.repo.update(id, data);
     if (!item) {
       const error = new Error('${CAP_NAME} not found');
       error.statusCode = 404;
@@ -576,7 +901,7 @@ class ${CAP_NAME}Service {
   }
 
   async delete(id) {
-    const item = await ${MODULE_NAME}Repository.delete(id);
+    const item = await this.repo.delete(id);
     if (!item) {
       const error = new Error('${CAP_NAME} not found');
       error.statusCode = 404;
@@ -586,168 +911,85 @@ class ${CAP_NAME}Service {
   }
 }
 
-module.exports = new ${CAP_NAME}Service();
-EOD
-
-# 4. Controller
-cat <<EOD > "$DIR/$MODULE_NAME.controller.js"
-const ${MODULE_NAME}Service = require('./${MODULE_NAME}.service');
-const ApiResponse = require('../../common/utils/response');
-
+// ── Controller ───────────────────────────────────────────
 class ${CAP_NAME}Controller {
+  constructor() {
+    this.service = new ${CAP_NAME}Service();
+  }
+
   async getAll(req, res, next) {
     try {
-      const filters = req.query.filters || {};
-      const options = {
-        page: parseInt(req.query.page) || 1,
-        limit: parseInt(req.query.limit) || 10,
-        sort: req.query.sort || '-createdAt'
-      };
-
-      const result = await ${MODULE_NAME}Service.getAll(filters, options);
-      ApiResponse.success(res, result);
-    } catch (error) {
-      next(error);
-    }
+      const page  = parseInt(req.query.page)  || 1;
+      const limit = parseInt(req.query.limit) || 10;
+      const data = await this.service.getAll(page, limit);
+      ApiResponse.success(res, data);
+    } catch (error) { next(error); }
   }
 
   async getById(req, res, next) {
     try {
-      const data = await ${MODULE_NAME}Service.getById(req.params.id);
+      const data = await this.service.getById(req.params.id);
       ApiResponse.success(res, data);
-    } catch (error) {
-      next(error);
-    }
+    } catch (error) { next(error); }
   }
 
   async create(req, res, next) {
     try {
-      const data = await ${MODULE_NAME}Service.create(req.body);
+      const data = await this.service.create(req.body);
       ApiResponse.created(res, data, '${CAP_NAME} created successfully');
-    } catch (error) {
-      next(error);
-    }
+    } catch (error) { next(error); }
   }
 
   async update(req, res, next) {
     try {
-      const data = await ${MODULE_NAME}Service.update(req.params.id, req.body);
+      const data = await this.service.update(req.params.id, req.body);
       ApiResponse.success(res, data, '${CAP_NAME} updated successfully');
-    } catch (error) {
-      next(error);
-    }
+    } catch (error) { next(error); }
   }
 
   async delete(req, res, next) {
     try {
-      await ${MODULE_NAME}Service.delete(req.params.id);
+      await this.service.delete(req.params.id);
       ApiResponse.success(res, null, '${CAP_NAME} deleted successfully');
-    } catch (error) {
-      next(error);
-    }
+    } catch (error) { next(error); }
   }
 }
 
-module.exports = new ${CAP_NAME}Controller();
-EOD
-
-# 5. Middleware (Module-specific)
-cat <<EOD > "$DIR/middlewares/${MODULE_NAME}.middleware.js"
-const ${MODULE_NAME}Repository = require('../${MODULE_NAME}.repository');
-
-/**
- * Check if ${MODULE_NAME} exists
- */
-const check${CAP_NAME}Exists = async (req, res, next) => {
-  try {
-    const id = req.params.id;
-    const exists = await ${MODULE_NAME}Repository.exists({ _id: id });
-
-    if (!exists) {
-      return res.status(404).json({
-        success: false,
-        message: '${CAP_NAME} not found'
-      });
-    }
-
-    next();
-  } catch (error) {
-    next(error);
+// ── Module ───────────────────────────────────────────────
+class ${CAP_NAME}Module {
+  constructor() {
+    this.controller = new ${CAP_NAME}Controller();
+    this.router = express.Router();
+    this._registerRoutes();
   }
-};
 
-/**
- * Check ownership (example)
- */
-const checkOwnership = async (req, res, next) => {
-  try {
-    const item = await ${MODULE_NAME}Repository.findById(req.params.id);
+  _registerRoutes() {
+    const c = this.controller;
 
-    // Example: check if user owns this resource
-    // if (item.userId.toString() !== req.user.id) {
-    //   return res.status(403).json({
-    //     success: false,
-    //     message: 'Access denied'
-    //   });
-    // }
-
-    next();
-  } catch (error) {
-    next(error);
+    this.router.get('/',       (req, res, next) => c.getAll(req, res, next));
+    this.router.get('/:id',    (req, res, next) => c.getById(req, res, next));
+    this.router.post('/',      middlewares.auth, (req, res, next) => c.create(req, res, next));
+    this.router.put('/:id',    middlewares.auth, (req, res, next) => c.update(req, res, next));
+    this.router.delete('/:id', middlewares.auth, (req, res, next) => c.delete(req, res, next));
   }
-};
+}
 
-module.exports = {
-  check${CAP_NAME}Exists,
-  checkOwnership
-};
-EOD
-
-# 6. Routes
-cat <<EOD > "$DIR/$MODULE_NAME.routes.js"
-const express = require('express');
-const router = express.Router();
-const controller = require('./${MODULE_NAME}.controller');
-const { authenticate } = require('../../common/middlewares/auth');
-const validate = require('../../common/middlewares/validate');
-const { check${CAP_NAME}Exists } = require('./middlewares/${MODULE_NAME}.middleware');
-const { create${CAP_NAME}Dto, update${CAP_NAME}Dto } = require('./${MODULE_NAME}.dto');
-
-// Routes
-router.get('/', controller.getAll);
-router.get('/:id', check${CAP_NAME}Exists, controller.getById);
-router.post('/', validate(create${CAP_NAME}Dto), controller.create);
-router.put('/:id', check${CAP_NAME}Exists, validate(update${CAP_NAME}Dto), controller.update);
-router.delete('/:id', check${CAP_NAME}Exists, controller.delete);
-
-module.exports = router;
-EOD
-
-# 7. Index (Module Export)
-cat <<EOD > "$DIR/$MODULE_NAME.js"
-module.exports = require('./${MODULE_NAME}.routes');
+module.exports = ${CAP_NAME}Module;
 EOD
 
 echo ""
 echo "✅ Module '$MODULE_NAME' created successfully!"
 echo ""
 echo "📁 Generated files:"
-echo "   ├── ${MODULE_NAME}.model.js         (Schema)"
-echo "   ├── ${MODULE_NAME}.repository.js    (Data Access Layer)"
-echo "   ├── ${MODULE_NAME}.service.js       (Business Logic)"
-echo "   ├── ${MODULE_NAME}.controller.js    (HTTP Layer)"
-echo "   ├── ${MODULE_NAME}.routes.js        (Routes)"
-echo "   ├── middlewares/"
-echo "   │   └── ${MODULE_NAME}.middleware.js (Custom Middleware)"
-echo "   └── ${MODULE_NAME}.js                        (Module Export)"
+echo "   src/modules/${MODULE_NAME}/"
+echo "   └── ${MODULE_NAME}.module.js"
 echo ""
 echo "📝 Next steps:"
-echo "   1. Add to src/modules/index.js:"
-echo "      const ${MODULE_NAME}Routes = require('./${MODULE_NAME}');"
-echo "      router.use('/${MODULE_NAME}', ${MODULE_NAME}Routes);"
+echo "   Add to src/bootstrap/router.js:"
+echo "      const ${CAP_NAME}Module = require('../modules/${MODULE_NAME}/${MODULE_NAME}.module');"
+echo "      router.use('/${MODULE_NAME}', new ${CAP_NAME}Module().router);"
 echo ""
-echo "   2. Test your endpoidto.js           (Validation DTO)"
-echo "   ├── ${MODULE_NAME}.nts:"
+echo "   Endpoints:"
 echo "      GET    /api/v1/${MODULE_NAME}"
 echo "      GET    /api/v1/${MODULE_NAME}/:id"
 echo "      POST   /api/v1/${MODULE_NAME}"
@@ -759,7 +1001,7 @@ MAKER_EOF
 chmod +x module.sh
 
 # ---------------------------------------------------------
-# 13. نصب پکیج‌ها
+# 21. نصب پکیج‌ها
 # ---------------------------------------------------------
 echo ""
 echo "📥 Installing dependencies..."
@@ -769,17 +1011,24 @@ echo ""
 echo "✅✅✅ Project Ready! ✅✅✅"
 echo ""
 echo "📁 Structure:"
-echo "   ├── src/"
-echo "   │   ├── config/          ⚙️  Configuration"
-echo "   │   ├── common/          🏗️  Shared Infrastructure"
-echo "   │   ├── modules/         📦  Business Modules"
-echo "   │   ├── app.js           🔌  Express Setup"
-echo "   │   └── server.js        🚀  Server Entry"
+echo "   ├── .gitignore"
+echo "   ├── module.sh"
+echo "   └── src/"
+echo "       ├── bootstrap/        🚀 app.js · server.js · router.js"
+echo "       ├── http/             🌐 middlewares.js · errors.js · response.js"
+echo "       ├── app/              🧩 config.js · dispatch.js · container.js"
+echo "       ├── config/           ⚙️  pg.config.js"
+echo "       ├── infrastructure/   🏗️  env · logger"
+echo "       │   └── db/"
+echo "       │       ├── postgres/ 🐘 pg.js · errors.js"
+echo "       │       └── redis/    🔴 client.js"
+echo "       ├── modules/          📦 users · auth · health"
+echo "       └── shared/           🛠️  utils · validate · id · time · errors"
 echo ""
 echo "🚀 Quick Start:"
 echo "   cd $PROJECT_NAME"
 echo "   npm run dev"
 echo ""
 echo "📦 Create Module:"
-echo "   ./module.sh users"
+echo "   ./module.sh products"
 echo ""
