@@ -1,13 +1,23 @@
-'use strict';
+"use strict";
 
-const { Router } = require('express');
-const usersRouter = require('../modules/users/routes');
+const { Router } = require("express");
+const { storeRoutes } = require("../modules/store");
+// [AUTO-ROUTES]
+
+
 
 const router = Router();
 
-router.use('/v1/users', usersRouter);
+router.use("/v1/store", storeRoutes);
 
-// Register additional module routers here:
-// router.use('/v1/orders', require('../modules/orders/routes'));
+// [AUTO-USE]
+
+// ── 404 – unmatched API route ──────────────────────────────────────────────
+router.use((_req, res) => {
+  res
+    .status(404)
+    .json({ success: false, error: { message: "API endpoint not found" } });
+});
+
 
 module.exports = router;

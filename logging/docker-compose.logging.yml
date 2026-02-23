@@ -1,0 +1,170 @@
+# ============================================================
+# Production Logging Stack: Fluent Bit → Loki → Grafana
+# Deploy alongside your app compose file via:
+#   docker compose -f docker-compose.yml -f docker-compose.logging.yml up -d
+# Or standalone: docker compose -f docker-compose.logging.yml up -d
+# ============================================================
+
+name: logging-stack
+
+networks:
+  logging:
+    name: logging_net
+    driver: bridge
+
+volumes:
+  loki-data:
+    driver: local
+  grafana-data:
+    driver: local
+
+services:
+  # ----------------------------------------------------------
+  # LOKI — Log aggregation backend
+  # Bound to 127.0.0.1 only. Never expose port 3100 publicly.
+  # ----------------------------------------------------------
+  loki:
+    image: grafana/loki:3.0.0
+    container_name: loki
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3100:3100"
+    volumes:
+      - loki-data:/loki
+      - ./config/loki/loki.yml:/etc/loki/local-config.yaml:ro
+      - ./config/loki/rules:/loki/rules:ro
+    command: -config.file=/etc/loki/local-config.yaml
+    networks:
+      - logging
+    healthcheck:
+      test:
+        ["CMD-SHELL", "wget -q --spider http://localhost:3100/ready || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 256M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ----------------------------------------------------------
+  # GRAFANA — Visualization & alerting UI
+  # Bind to 127.0.0.1 and put behind Nginx/Caddy with TLS.
+  # ----------------------------------------------------------
+  grafana:
+    image: grafana/grafana:10.4.2
+    container_name: grafana
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      # Credentials — set in .env, never hardcode
+      GF_SECURITY_ADMIN_USER: "${GRAFANA_ADMIN_USER:?GRAFANA_ADMIN_USER must be set}"
+      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD must be set}"
+      # Harden
+      GF_SECURITY_DISABLE_GRAVATAR: "true"
+      GF_SECURITY_COOKIE_SECURE: "true"
+      GF_SECURITY_STRICT_TRANSPORT_SECURITY: "true"
+      GF_SECURITY_CONTENT_SECURITY_POLICY: "true"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_AUTH_BASIC_ENABLED: "true"
+      # Analytics opt-out
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      # Set to your actual external URL (required for alert notifications)
+      GF_SERVER_ROOT_URL: "${GRAFANA_ROOT_URL:-http://localhost:3000}"
+      GF_SERVER_DOMAIN: "${GRAFANA_DOMAIN:-localhost}"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./config/grafana/provisioning:/etc/grafana/provisioning:ro
+    networks:
+      - logging
+    depends_on:
+      loki:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+        reservations:
+          memory: 128M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ----------------------------------------------------------
+  # FLUENT BIT — Lightweight log collector/forwarder
+  # Reads Docker container logs directly from the host FS.
+  # Runs as root to access /var/lib/docker/containers and socket.
+  # ----------------------------------------------------------
+  fluent-bit:
+    image: fluent/fluent-bit:3.0.6
+    container_name: fluent-bit
+    restart: unless-stopped
+    # Fluent Bit HTTP server for health/metrics on internal interface only
+    ports:
+      - "127.0.0.1:2020:2020"
+    volumes:
+      # Docker container log files (read-only)
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      # Docker socket for container metadata enrichment
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Persistent DB for log offset tracking — survives restarts without re-reading
+      - /var/log/flb_docker.db:/var/log/flb_docker.db
+      - ./config/fluent-bit/fluent-bit.conf:/fluent-bit/etc/fluent-bit.conf:ro
+      - ./config/fluent-bit/parsers.conf:/fluent-bit/etc/parsers.conf:ro
+    networks:
+      - logging
+    depends_on:
+      loki:
+        condition: service_healthy
+    user: root
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+        reservations:
+          memory: 64M
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+# ----------------------------------------------------------
+# YOUR APP SERVICE — Add to your main docker-compose.yml
+# Shown here as a reference for required label/logging config.
+# ----------------------------------------------------------
+# app:
+#   build: .
+#   container_name: myapp
+#   restart: unless-stopped
+#   networks:
+#     - logging
+#     - default
+#   environment:
+#     NODE_ENV: production
+#     LOG_LEVEL: info
+#   labels:
+#     # These labels are extracted by Fluent Bit → sent as Loki labels
+#     logging: "enabled"
+#     app: "myapp"
+#     env: "production"
+#   logging:
+#     driver: json-file          # Keep Docker's json-file as buffer
+#     options:
+#       max-size: "50m"          # Per-file cap — tune to your volume
+#       max-file: "5"            # Total cap = 250 MB per container
+#       compress: "true"
+#       labels: "app,env"

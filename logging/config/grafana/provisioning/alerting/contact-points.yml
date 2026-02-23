@@ -1,0 +1,59 @@
+# ============================================================
+# Grafana — Alert notification contact points
+# Defines where alerts fire (Slack, PagerDuty, email, etc.)
+# ============================================================
+
+apiVersion: 1
+
+contactPoints:
+  - orgId: 1
+    name: default-slack
+    receivers:
+      - uid: slack-receiver
+        type: slack
+        settings:
+          url: "${SLACK_WEBHOOK_URL}"
+          channel: "#alerts-prod"
+          title: |
+            [{{ .Status | toUpper }}{{ if eq .Status "firing" }}:{{ .Alerts.Firing | len }}{{ end }}] {{ .CommonLabels.alertname }}
+          text: |
+            {{ range .Alerts }}
+            *Alert:* {{ .Labels.alertname }}
+            *Severity:* {{ .Labels.severity }}
+            *Summary:* {{ .Annotations.summary }}
+            *Description:* {{ .Annotations.description }}
+            {{ end }}
+          # Set to true to send resolved notifications
+          sendResolved: true
+
+  - orgId: 1
+    name: default-email
+    receivers:
+      - uid: email-receiver
+        type: email
+        settings:
+          addresses: "${ALERT_EMAIL_TO}"
+          subject: "[{{ .Status | toUpper }}] {{ .CommonLabels.alertname }}"
+          message: |
+            {{ range .Alerts }}
+            Alert: {{ .Labels.alertname }}
+            Severity: {{ .Labels.severity }}
+            Summary: {{ .Annotations.summary }}
+            Description: {{ .Annotations.description }}
+            {{ end }}
+          sendResolved: true
+
+# ── Routing policy ───────────────────────────────────────────
+policies:
+  - orgId: 1
+    receiver: default-slack
+    group_by: ["alertname", "app", "env"]
+    group_wait: 30s
+    group_interval: 5m
+    repeat_interval: 4h
+    routes:
+      # Critical alerts — also send email
+      - receiver: default-email
+        matchers:
+          - severity = critical
+        continue: true # Also send to parent (Slack)

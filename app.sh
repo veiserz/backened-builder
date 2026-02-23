@@ -1,4 +1,4 @@
-#!/bin/bash
+﻿#!/bin/bash
 
 # 1. دریافت نام پروژه
 PROJECT_NAME=$1
@@ -30,16 +30,21 @@ cat <<EOF > package.json
     "generate:module": "./module.sh"
   },
   "dependencies": {
-    "dotenv": "^16.3.1",
+    "dotenv": "^16.4.5",
     "express": "^4.18.2",
     "pg": "^8.11.3",
-    "redis": "^4.6.0",
+    "ioredis": "^5.3.2",
+    "bull": "^4.12.2",
     "bcryptjs": "^2.4.3",
     "jsonwebtoken": "^9.0.2",
-    "joi": "^17.10.1",
+    "zod": "^3.22.4",
+    "@sinclair/typebox": "^0.32.35",
     "cors": "^2.8.5",
-    "helmet": "^7.0.0",
-    "morgan": "^1.10.0"
+    "helmet": "^7.1.0",
+    "compression": "^1.7.4",
+    "express-rate-limit": "^7.1.5",
+    "winston": "^3.11.0",
+    "uuid": "^9.0.0"
   },
   "devDependencies": {
     "nodemon": "^3.0.1"
@@ -52,17 +57,20 @@ EOF
 # ---------------------------------------------------------
 echo "📂 Creating directories..."
 mkdir -p src/bootstrap
-mkdir -p src/http
-mkdir -p src/app
-mkdir -p src/config
-mkdir -p src/infrastructure/db/postgres
-mkdir -p src/infrastructure/db/redis
+mkdir -p src/infrastructure/database/postgresql/migrations
+mkdir -p src/infrastructure/cache/redis
+mkdir -p src/infrastructure/eventbus
 mkdir -p src/infrastructure/queue
-mkdir -p src/infrastructure/dispatch
-mkdir -p src/modules/users
-mkdir -p src/modules/auth
-mkdir -p src/modules/health
-mkdir -p src/shared
+mkdir -p src/app/config
+mkdir -p src/app/container
+mkdir -p src/app/dispatch
+mkdir -p src/shared/errors
+mkdir -p src/shared/utils
+mkdir -p src/shared/validation
+mkdir -p src/http/errors
+mkdir -p src/http/middlewares
+mkdir -p src/http/response
+mkdir -p src/modules
 
 echo "⚙️ Config files..."
 cat <<EOF > .gitignore
@@ -73,231 +81,303 @@ node_modules
 EOF
 
 cat <<EOF > .env
-# Server
+# ── Server ───────────────────────────────────────────────────────
 PORT=3000
 NODE_ENV=development
+CORS_ORIGIN=
+CORS_CREDENTIALS=false
 
-# PostgreSQL
-PG_HOST=localhost
-PG_PORT=5432
-PG_DATABASE=$PROJECT_NAME
-PG_USER=postgres
-PG_PASSWORD=postgres
-PG_POOL_MAX=20
-PG_POOL_IDLE_TIMEOUT=30000
-PG_POOL_CONNECTION_TIMEOUT=2000
-PG_STATEMENT_TIMEOUT=30000
-PG_SLOW_QUERY_THRESHOLD=1000
+# ── PostgreSQL ───────────────────────────────────────────────────
+DB_HOST=localhost
+DB_PORT=5432
+DB_NAME=$PROJECT_NAME
+DB_USER=postgres
+DB_PASSWORD=postgres
+DB_POOL_MAX=10
+DB_SLOW_QUERY_MS=200
 
-# Redis
+# ── Redis ────────────────────────────────────────────────────────
 REDIS_HOST=localhost
 REDIS_PORT=6379
+REDIS_DB=0
+REDIS_PASSWORD=
 
-# JWT
-JWT_SECRET=change_me_please_very_secure_key
+# ── JWT ──────────────────────────────────────────────────────────
+JWT_SECRET=change_me_please_very_secure_key_min12
 JWT_EXPIRES_IN=7d
 
-# Other
-API_PREFIX=/api/v1
+# ── Rate Limiting ────────────────────────────────────────────────
+RATE_LIMIT_WINDOW_MS=900000
+RATE_LIMIT_MAX=100
+
+# ── Feature Flags ────────────────────────────────────────────────
+FEATURE_EMAIL_VERIFICATION=false
+FEATURE_RATE_LIMITING=true
+FEATURE_AUDIT_LOG=false
+
+# ── Logging ──────────────────────────────────────────────────────
+LOG_LEVEL=info
 EOF
 
 # ---------------------------------------------------------
-# 4. Config - PostgreSQL
-# ---------------------------------------------------------
-echo "⚙️ Creating config/pg.config.js..."
-cat <<EOF > src/config/pg.config.js
-require('dotenv').config();
-
-module.exports = {
-  connection: {
-    host:     process.env.PG_HOST     || 'localhost',
-    port:     parseInt(process.env.PG_PORT) || 5432,
-    database: process.env.PG_DATABASE || 'mydb',
-    user:     process.env.PG_USER     || 'postgres',
-    password: process.env.PG_PASSWORD || 'postgres',
-  },
-  pool: {
-    max:               parseInt(process.env.PG_POOL_MAX)                || 20,
-    idleTimeoutMillis: parseInt(process.env.PG_POOL_IDLE_TIMEOUT)       || 30000,
-    connectionTimeoutMillis: parseInt(process.env.PG_POOL_CONNECTION_TIMEOUT) || 2000,
-  },
-  query: {
-    statement_timeout:  parseInt(process.env.PG_STATEMENT_TIMEOUT)      || 30000,
-    slowQueryThreshold: parseInt(process.env.PG_SLOW_QUERY_THRESHOLD)   || 1000,
-  },
-};
-EOF
-
-# ---------------------------------------------------------
-# 5. Infrastructure - Env
+# 4. Infrastructure - Env (Zod validation)
 # ---------------------------------------------------------
 echo "⚙️ Creating infrastructure/env.js..."
-cat <<EOF > src/infrastructure/env.js
-require('dotenv').config();
+cat <<'EOF' > src/infrastructure/env.js
+"use strict";
 
-module.exports = {
-  server: {
-    port: process.env.PORT || 3000,
-    env: process.env.NODE_ENV || 'development',
-    apiPrefix: process.env.API_PREFIX || '/api/v1'
-  },
-  jwt: {
-    secret: process.env.JWT_SECRET,
-    expiresIn: process.env.JWT_EXPIRES_IN || '7d'
-  }
+const env = {
+  NODE_ENV: process.env.NODE_ENV || "development",
+  PORT: process.env.PORT || "3000",
+  DB_HOST: process.env.DB_HOST || null,
+  DB_PORT: process.env.DB_PORT || "5432",
+  DB_NAME: process.env.DB_NAME || null,
+  DB_USER: process.env.DB_USER || null,
+  DB_PASSWORD: process.env.DB_PASSWORD || null,
+  REDIS_HOST: process.env.REDIS_HOST || null,
+  REDIS_PORT: process.env.REDIS_PORT || "6379",
+  JWT_SECRET: process.env.JWT_SECRET || null,
 };
+
+const required = [
+  "DB_HOST",
+  "DB_NAME",
+  "DB_USER",
+  "DB_PASSWORD",
+  "REDIS_HOST",
+  "JWT_SECRET",
+];
+
+function validateEnv() {
+  const errors = [];
+
+  for (const key of required) {
+    if (!env[key]) {
+      errors.push(`  ${key}: Required`);
+    }
+  }
+
+  if (env.JWT_SECRET && env.JWT_SECRET.length < 12) {
+    errors.push("  JWT_SECRET: Must be at least 12 characters");
+  }
+
+  if (errors.length > 0) {
+    throw new Error(`Environment validation failed:\n${errors.join("\n")}`);
+  }
+}
+
+module.exports = { env, validateEnv };
+
 EOF
 
 # ---------------------------------------------------------
-# 6. Infrastructure - Config (placeholder)
-# ---------------------------------------------------------
-touch src/infrastructure/config.js
-
-# ---------------------------------------------------------
-# 7. Infrastructure - Logger
+# 5. Infrastructure - Logger (Winston)
 # ---------------------------------------------------------
 echo "📋 Creating infrastructure/logger.js..."
-cat <<EOF > src/infrastructure/logger.js
-const morgan = require('morgan');
+cat <<'EOF' > src/infrastructure/logger.js
+"use strict";
 
-const logger = morgan(':method :url :status :res[content-length] - :response-time ms');
+const fs = require("fs");
+const winston = require("winston");
+const { env } = require("./env");
 
-module.exports = logger;
+const { combine, timestamp, json, colorize, simple, errors } = winston.format;
+
+const isProduction = env.NODE_ENV === "production";
+
+if (isProduction && !fs.existsSync("logs")) {
+  fs.mkdirSync("logs", { recursive: true });
+}
+
+const logger = winston.createLogger({
+  level: process.env.LOG_LEVEL || "info",
+  format: combine(
+    errors({ stack: true }),
+    timestamp(),
+    isProduction ? json() : combine(colorize(), simple()),
+  ),
+  transports: [
+    new winston.transports.Console(),
+    ...(isProduction
+      ? [
+          new winston.transports.File({
+            filename: "logs/error.log",
+            level: "error",
+          }),
+          new winston.transports.File({ filename: "logs/combined.log" }),
+        ]
+      : []),
+  ],
+  exceptionHandlers: isProduction
+    ? [new winston.transports.File({ filename: "logs/exceptions.log" })]
+    : [new winston.transports.Console()],
+  rejectionHandlers: isProduction
+    ? [new winston.transports.File({ filename: "logs/rejections.log" })]
+    : [new winston.transports.Console()],
+});
+
+module.exports = { logger };
+
 EOF
 
 # ---------------------------------------------------------
-# 8. Infrastructure - DB - PostgreSQL errors
+# 6. Infrastructure - PostgreSQL
 # ---------------------------------------------------------
-echo "🔌 Creating infrastructure/db/postgres/errors.js..."
-cat <<EOF > src/infrastructure/db/postgres/errors.js
-class DatabaseError extends Error {
-  constructor(message, code, original) {
-    super(message);
-    this.name = 'DatabaseError';
-    this.code = code;
-    this.original = original;
-  }
-}
+echo "🔌 Creating infrastructure/database/postgresql/..."
 
-class ConnectionError extends Error {
-  constructor(message, original) {
-    super(message);
-    this.name = 'ConnectionError';
-    this.original = original;
-  }
-}
+cat <<'EOF' > src/infrastructure/database/postgresql/connection.js
 
-class QueryError extends Error {
-  constructor(message, code, original) {
-    super(message);
-    this.name = 'QueryError';
-    this.code = code;
-    this.original = original;
-  }
-}
-
-class UniqueViolationError extends DatabaseError {
-  constructor(message, original) {
-    super(message, '23505', original);
-    this.name = 'UniqueViolationError';
-  }
-}
-
-class ForeignKeyViolationError extends DatabaseError {
-  constructor(message, original) {
-    super(message, '23503', original);
-    this.name = 'ForeignKeyViolationError';
-  }
-}
-
-class NotNullViolationError extends DatabaseError {
-  constructor(message, original) {
-    super(message, '23502', original);
-    this.name = 'NotNullViolationError';
-  }
-}
-
-/**
- * Normalize raw pg errors into structured domain errors
- * @param {Error} error - Raw pg error
- * @returns {DatabaseError|QueryError|ConnectionError|Error}
- */
-const normalizeError = (error) => {
-  switch (error.code) {
-    case '23505':
-      return new UniqueViolationError(
-        \`Unique constraint violated: \${error.detail || error.message}\`,
-        error
-      );
-    case '23503':
-      return new ForeignKeyViolationError(
-        \`Foreign key constraint violated: \${error.detail || error.message}\`,
-        error
-      );
-    case '23502':
-      return new NotNullViolationError(
-        \`Not null constraint violated: \${error.detail || error.message}\`,
-        error
-      );
-    case 'ECONNREFUSED':
-    case '08006':
-    case '08001':
-    case '08004':
-      return new ConnectionError(
-        \`Database connection failed: \${error.message}\`,
-        error
-      );
-    case '42601':
-      return new QueryError(
-        \`SQL syntax error: \${error.message}\`,
-        error.code,
-        error
-      );
-    case '42703':
-      return new QueryError(
-        \`Column does not exist: \${error.message}\`,
-        error.code,
-        error
-      );
-    case '42P01':
-      return new QueryError(
-        \`Table does not exist: \${error.message}\`,
-        error.code,
-        error
-      );
-    default:
-      return new DatabaseError(
-        error.message || 'Unknown database error',
-        error.code,
-        error
-      );
-  }
-};
-
-module.exports = {
-  normalizeError,
-  DatabaseError,
-  ConnectionError,
-  QueryError,
-  UniqueViolationError,
-  ForeignKeyViolationError,
-  NotNullViolationError,
-};
-EOF
-
-# ---------------------------------------------------------
-# 9. Infrastructure - DB - PostgreSQL pg.js
-# ---------------------------------------------------------
-echo "🔌 Creating infrastructure/db/postgres/pg.js..."
-cat <<'EOF' > src/infrastructure/db/postgres/pg.js
-/**
- * High-Performance PostgreSQL Database Wrapper
- * Simple API: db.execute() and db.Transaction()
- */
+"use strict";
 
 const { Pool } = require("pg");
-const pgConfig = require("../../../config/pg.config");
-const { normalizeError } = require("./errors");
+const { logger } = require("../../logger");
+
+let pool;
+
+/**
+ * Create the shared pg.Pool, verify connectivity, and attach pool-level
+ * event listeners. Must be called once during application bootstrap.
+ * @returns {Promise<import('pg').Pool>}
+ */
+async function connectPostgres() {
+  pool = new Pool({
+    host: process.env.DB_HOST,
+    port: parseInt(process.env.DB_PORT || "5432", 10),
+    database: process.env.DB_NAME,
+    user: process.env.DB_USER,
+    password: process.env.DB_PASSWORD,
+    max: parseInt(process.env.DB_POOL_MAX || "10", 10),
+    idleTimeoutMillis: 30_000,
+    connectionTimeoutMillis: 5_000,
+  });
+
+  // Log pool-level errors (e.g. idle client errors)
+  pool.on("error", (err) => logger.error("PostgreSQL pool error", { err }));
+
+  // Log each new physical connection (debug level to avoid noise)
+  pool.on("connect", () =>
+    logger.debug("PostgreSQL pool: new client connected"),
+  );
+
+  // Verify connectivity on startup
+  const client = await pool.connect();
+  client.release();
+  logger.info("PostgreSQL connected", {
+    host: process.env.DB_HOST,
+    port: process.env.DB_PORT || 5432,
+    database: process.env.DB_NAME,
+  });
+  return pool;
+}
+
+/**
+ * Gracefully drain and close the connection pool.
+ * Should be called during application shutdown.
+ * @returns {Promise<void>}
+ */
+async function disconnectPostgres() {
+  if (!pool) return;
+  await pool.end();
+  pool = undefined;
+  logger.info("PostgreSQL disconnected");
+}
+
+function getPool() {
+  if (!pool)
+    throw new Error(
+      "PostgreSQL pool not initialised – call connectPostgres() first",
+    );
+  return pool;
+}
+
+module.exports = { connectPostgres, disconnectPostgres, getPool };
+
+EOF
+
+cat <<'EOF' > src/infrastructure/database/postgresql/db.js
+"use strict";
+
+const { getPool } = require("./connection");
+const { logger } = require("../../logger");
+
+/** Queries slower than this threshold (ms) are logged as warnings. */
+const SLOW_QUERY_MS = parseInt(process.env.DB_SLOW_QUERY_MS || "200", 10);
+
+/**
+ * Thin query helper built on the shared pg.Pool.
+ *
+ * API:
+ *   db.query(sql, params?)              – single statement, returns pg.QueryResult
+ *   db.transaction(async (client) => {}) – BEGIN / COMMIT / ROLLBACK wrapper
+ */
+const db = {
+  /**
+   * Execute a single SQL statement against the pool.
+   *
+   * @param {string}  sql
+   * @param {any[]}   [params=[]]
+   * @returns {Promise<import('pg').QueryResult>}
+   *
+   * @example
+   * const result = await db.query('SELECT * FROM stores WHERE id = $1', [id]);
+   * return result.rows;
+   */
+  async query(sql, params = []) {
+    const pool = getPool();
+    const startAt = Date.now();
+
+    try {
+      const result = await pool.query(sql, params);
+      const ms = Date.now() - startAt;
+
+      if (ms > SLOW_QUERY_MS) {
+        logger.warn("Slow query detected", { ms, sql: sql.substring(0, 150) });
+      }
+
+      return result;
+    } catch (err) {
+      logger.error("Query error", { err, sql: sql.substring(0, 150) });
+      throw err;
+    }
+  },
+
+  /**
+   * Run multiple statements inside a single transaction.
+   * Automatically issues BEGIN, COMMIT, and ROLLBACK on error.
+   * The client is always released back to the pool.
+   *
+   * @template T
+   * @param {function(import('pg').PoolClient): Promise<T>} callback
+   * @returns {Promise<T>}
+   *
+   * @example
+   * const result = await db.transaction(async (client) => {
+   *   await client.query('INSERT INTO stores (id, name) VALUES ($1, $2)', [id, name]);
+   *   await client.query('INSERT INTO audit_log (action) VALUES ($1)', ['store.created']);
+   *   return { id };
+   * });
+   */
+  async transaction(callback) {
+    const pool = getPool();
+    const client = await pool.connect();
+
+    try {
+      await client.query("BEGIN");
+      const result = await callback(client);
+      await client.query("COMMIT");
+      return result;
+    } catch (err) {
+      await client
+        .query("ROLLBACK")
+        .catch((rbErr) => logger.error("ROLLBACK failed", { rbErr }));
+      throw err;
+    } finally {
+      client.release();
+    }
+  },
+};
+
+module.exports = { db };
 
 class Database {
   constructor() {
@@ -434,6 +514,7 @@ class Database {
       );
       await client.query("BEGIN");
 
+      // Create executor function for transaction context
       const executeInTx = async (queryObj) => {
         const sql = typeof queryObj === "string" ? queryObj : queryObj.text;
         const values = typeof queryObj === "string" ? [] : queryObj.values;
@@ -493,225 +574,828 @@ class Database {
 module.exports = new Database();
 EOF
 
-# ---------------------------------------------------------
-# 10. Infrastructure - DB - Redis
-# ---------------------------------------------------------
-echo "🔌 Creating infrastructure/db/redis/client.js..."
-cat <<EOF > src/infrastructure/db/redis/client.js
-const redis = require('redis');
+cat <<'EOF' > src/infrastructure/database/postgresql/index.js
+'use strict';
 
-let client = null;
-
-const connectRedis = async () => {
-  try {
-    client = redis.createClient({
-      socket: {
-        host: process.env.REDIS_HOST || 'localhost',
-        port: parseInt(process.env.REDIS_PORT) || 6379,
-      }
-    });
-
-    client.on('error',     (err) => console.error('❌ Redis Error:', err));
-    client.on('connect',   ()    => console.log('✅ Redis Connected'));
-    client.on('reconnecting', () => console.warn('⚠️  Redis Reconnecting...'));
-
-    await client.connect();
-    return client;
-  } catch (error) {
-    console.error('❌ Redis Connection Error:', error.message);
-    throw error;
-  }
+module.exports = {
+  ...require('./connection'),
+  ...require('./db'),
 };
+EOF
 
-const getClient = () => {
-  if (!client) {
-    throw new Error('Redis client not initialized. Call connectRedis() first.');
-  }
-  return client;
-};
+cat <<'EOF' > src/infrastructure/database/postgresql/migrations/001_create_users.sql
+-- Users table
+CREATE TABLE IF NOT EXISTS users (
+  id          UUID PRIMARY KEY,
+  email       VARCHAR(255) NOT NULL,
+  password    VARCHAR(255) NOT NULL,
+  role        VARCHAR(50)  NOT NULL DEFAULT 'user',
+  created_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+  updated_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
 
-const closeRedis = async () => {
-  if (client) {
-    await client.quit();
-    client = null;
-    console.log('✅ Redis Connection Closed');
-  }
-};
-
-module.exports = { connectRedis, getClient, closeRedis };
+CREATE UNIQUE INDEX IF NOT EXISTS users_email_idx ON users (email);
 EOF
 
 # ---------------------------------------------------------
-# 11. Infrastructure - Queue
+# 7. Infrastructure - Redis (ioredis)
 # ---------------------------------------------------------
-echo "📨 Creating infrastructure/queue..."
-touch src/infrastructure/queue/client.js
-touch src/infrastructure/queue/producer.js
-touch src/infrastructure/queue/consumer.js
+echo "🔌 Creating infrastructure/cache/redis/..."
+
+cat <<'EOF' > src/infrastructure/cache/redis/connection.js
+'use strict';
+
+const Redis      = require('ioredis');
+const { logger } = require('../../logger');
+
+let redisInstance;
+
+async function connectRedis() {
+  redisInstance = new Redis({
+    host:                 process.env.REDIS_HOST     || 'localhost',
+    port:                 parseInt(process.env.REDIS_PORT || '6379', 10),
+    db:                   parseInt(process.env.REDIS_DB   || '0',    10),
+    password:             process.env.REDIS_PASSWORD || undefined,
+    lazyConnect:          true,
+    maxRetriesPerRequest: 3,
+    enableReadyCheck:     true,
+  });
+
+  redisInstance.on('error',       (err) => logger.error('Redis error', { err }));
+  redisInstance.on('reconnecting', ()   => logger.warn('Redis reconnecting…'));
+
+  await redisInstance.connect();
+  logger.info('Redis connected', {
+    host: process.env.REDIS_HOST || 'localhost',
+    port: process.env.REDIS_PORT || 6379,
+    db:   process.env.REDIS_DB   || 0,
+  });
+  return redisInstance;
+}
+
+async function disconnectRedis() {
+  if (!redisInstance) return;
+  await redisInstance.quit();
+  redisInstance = undefined;
+  logger.info('Redis disconnected');
+}
+
+function getRedis() {
+  if (!redisInstance) throw new Error('Redis not initialised – call connectRedis() first');
+  return redisInstance;
+}
+
+module.exports = { connectRedis, disconnectRedis, getRedis };
+EOF
+
+cat <<'EOF' > src/infrastructure/cache/redis/client.js
+'use strict';
+
+const { getRedis } = require('./connection');
+
+function serialise(value) {
+  return typeof value === 'string' ? value : JSON.stringify(value);
+}
+function deserialise(raw) {
+  if (raw === null) return null;
+  try { return JSON.parse(raw); } catch { return raw; }
+}
+
+const redisClient = {
+  async get(key)                    { return deserialise(await getRedis().get(key)); },
+  async set(key, value, ttl = null) {
+    const s = serialise(value);
+    return ttl ? getRedis().set(key, s, 'EX', ttl) : getRedis().set(key, s);
+  },
+  async del(keys) {
+    const list = Array.isArray(keys) ? keys : [keys];
+    return getRedis().del(...list);
+  },
+  async exists(key)            { return (await getRedis().exists(key)) > 0; },
+  async expire(key, ttl)       { return (await getRedis().expire(key, ttl)) === 1; },
+  async ttl(key)               { return getRedis().ttl(key); },
+  async mget(keys)             { return (await getRedis().mget(...keys)).map(deserialise); },
+  async mset(map) {
+    const args = Object.entries(map).flatMap(([k, v]) => [k, serialise(v)]);
+    return getRedis().mset(...args);
+  },
+  async incr(key)              { return getRedis().incr(key); },
+  async incrby(key, n)         { return getRedis().incrby(key, n); },
+  async decr(key)              { return getRedis().decr(key); },
+  async decrby(key, n)         { return getRedis().decrby(key, n); },
+  async hget(key, field)       { return deserialise(await getRedis().hget(key, field)); },
+  async hset(key, field, val)  { return getRedis().hset(key, field, serialise(val)); },
+  async hdel(key, ...fields)   { return getRedis().hdel(key, ...fields); },
+  async hgetall(key) {
+    const raw = await getRedis().hgetall(key);
+    if (!raw) return null;
+    return Object.fromEntries(Object.entries(raw).map(([k, v]) => [k, deserialise(v)]));
+  },
+  async hincrby(key, field, n) { return getRedis().hincrby(key, field, n); },
+  async flush() {
+    if (process.env.NODE_ENV === 'production') throw new Error('flush() blocked in production');
+    return getRedis().flushdb();
+  },
+};
+
+module.exports = { redisClient };
+EOF
+
+cat <<'EOF' > src/infrastructure/cache/redis/index.js
+'use strict';
+
+module.exports = {
+  ...require('./connection'),
+  ...require('./client'),
+};
+EOF
 
 # ---------------------------------------------------------
-# 12. Infrastructure - Dispatch
+# 8. Infrastructure - EventBus
 # ---------------------------------------------------------
-echo "📡 Creating infrastructure/dispatch..."
-touch src/infrastructure/dispatch/bus.js
-touch src/infrastructure/dispatch/registry.js
+echo "📡 Creating infrastructure/eventbus/..."
+
+cat <<'EOF' > src/infrastructure/eventbus/bus.js
+'use strict';
+
+const EventEmitter = require('events');
+const { logger }   = require('../logger');
+
+class EventBus extends EventEmitter {
+  async publish(event, payload) {
+    logger.debug('EventBus publish', { event });
+    this.emit(event, payload);
+  }
+  subscribe(event, listener)     { this.on(event, listener); }
+  subscribeOnce(event, listener) { this.once(event, listener); }
+  unsubscribe(event, listener)   { this.off(event, listener); }
+  clearAll(event) {
+    event ? this.removeAllListeners(event) : this.removeAllListeners();
+  }
+}
+
+const bus = new EventBus();
+bus.setMaxListeners(50);
+
+module.exports = { bus, EventBus };
+EOF
+
+cat <<'EOF' > src/infrastructure/eventbus/index.js
+'use strict';
+module.exports = require('./bus');
+EOF
 
 # ---------------------------------------------------------
-# 13. HTTP Layer
+# 9. Infrastructure - Queue (Bull)
 # ---------------------------------------------------------
-echo "🛡️ Creating http layer..."
+echo "📨 Creating infrastructure/queue/..."
 
-cat <<EOF > src/http/middlewares.js
-const jwt = require('jsonwebtoken');
-const config = require('../infrastructure/env');
+cat <<'EOF' > src/infrastructure/queue/client.js
+'use strict';
 
-class Middlewares {
-  auth(req, res, next) {
+const Bull       = require('bull');
+const { logger } = require('../logger');
+
+const queues = new Map();
+
+function getQueue(name) {
+  if (!queues.has(name)) {
+    const q = new Bull(name, {
+      redis: {
+        host:     process.env.REDIS_HOST || 'localhost',
+        port:     parseInt(process.env.REDIS_PORT || '6379', 10),
+        db:       parseInt(process.env.REDIS_DB   || '0',    10),
+        password: process.env.REDIS_PASSWORD || undefined,
+      },
+    });
+    q.on('error',     (err) => logger.error(`Queue "${name}" error`, { err }));
+    q.on('failed',    (job, err) => logger.warn(`Job failed in "${name}"`, { jobId: job.id, err }));
+    q.on('stalled',   (job) => logger.warn(`Job stalled in "${name}"`, { jobId: job.id }));
+    q.on('completed', (job) => logger.debug(`Job completed in "${name}"`, { jobId: job.id }));
+    queues.set(name, q);
+  }
+  return queues.get(name);
+}
+
+async function closeQueue(name) {
+  const q = queues.get(name);
+  if (!q) return;
+  await q.close();
+  queues.delete(name);
+}
+
+async function closeAllQueues() {
+  await Promise.all([...queues.keys()].map(closeQueue));
+  logger.info('All queues closed');
+}
+
+module.exports = { getQueue, closeQueue, closeAllQueues };
+EOF
+
+cat <<'EOF' > src/infrastructure/queue/producer.js
+'use strict';
+
+const { getQueue } = require('./client');
+
+const DEFAULTS = { attempts: 3, backoff: { type: 'exponential', delay: 2000 }, removeOnComplete: 100, removeOnFail: 200 };
+
+async function enqueue(queueName, data, opts = {}) {
+  const job = await getQueue(queueName).add(data, { ...DEFAULTS, ...opts });
+  return job.id;
+}
+
+async function enqueueBulk(queueName, items) {
+  const jobs = await getQueue(queueName).addBulk(
+    items.map(({ data, opts = {} }) => ({ data, opts: { ...DEFAULTS, ...opts } }))
+  );
+  return jobs.map((j) => j.id);
+}
+
+async function enqueueIn(queueName, data, delayMs, opts = {}) {
+  return enqueue(queueName, data, { delay: delayMs, ...opts });
+}
+
+module.exports = { enqueue, enqueueBulk, enqueueIn };
+EOF
+
+cat <<'EOF' > src/infrastructure/queue/consumer.js
+'use strict';
+
+const { getQueue } = require('./client');
+const { logger }   = require('../logger');
+
+function consume(queueName, processor, options = {}) {
+  const concurrency = options.concurrency || 1;
+  getQueue(queueName).process(concurrency, async (job) => {
     try {
-      const token = req.headers.authorization?.split(' ')[1];
+      return await processor(job);
+    } catch (err) {
+      logger.error(`Job ${job.id} in "${queueName}" failed`, { err, data: job.data });
+      throw err;
+    }
+  });
+  logger.info(`Consumer registered for queue "${queueName}"`, { concurrency });
+}
 
-      if (!token) {
-        return res.status(401).json({
-          success: false,
-          message: 'Authentication required'
-        });
-      }
+async function pauseQueue(queueName)  { await getQueue(queueName).pause();  logger.info(`Queue "${queueName}" paused`); }
+async function resumeQueue(queueName) { await getQueue(queueName).resume(); logger.info(`Queue "${queueName}" resumed`); }
 
-      const decoded = jwt.verify(token, config.jwt.secret);
-      req.user = decoded;
+module.exports = { consume, pauseQueue, resumeQueue };
+EOF
+
+cat <<'EOF' > src/infrastructure/queue/index.js
+'use strict';
+module.exports = {
+  ...require('./client'),
+  ...require('./producer'),
+  ...require('./consumer'),
+};
+EOF
+
+cat <<'EOF' > src/infrastructure/index.js
+'use strict';
+module.exports = {
+  ...require('./env'),
+  ...require('./logger'),
+  ...require('./database/postgresql'),
+  ...require('./cache/redis'),
+  ...require('./eventbus'),
+  ...require('./queue'),
+};
+EOF
+
+# ---------------------------------------------------------
+# 10. Shared - Errors
+# ---------------------------------------------------------
+echo "ðŸ› ï¸ Creating shared/errors/..."
+
+cat <<'EOF' > src/shared/errors/domainError.js
+'use strict';
+
+class DomainError extends Error {
+  constructor(message, code = 'DOMAIN_ERROR', meta = null) {
+    super(message);
+    this.name  = 'DomainError';
+    this.code  = code;
+    this.meta  = meta;
+    Error.captureStackTrace(this, this.constructor);
+  }
+
+  static notFound(message   = 'Resource not found',    meta = null) { return new DomainError(message, 'NOT_FOUND',    meta); }
+  static conflict(message   = 'Resource already exists',meta = null) { return new DomainError(message, 'CONFLICT',     meta); }
+  static forbidden(message  = 'Access denied',          meta = null) { return new DomainError(message, 'FORBIDDEN',    meta); }
+  static validation(message = 'Validation failed',      meta = null) { return new DomainError(message, 'VALIDATION',   meta); }
+  static unauthorised(message = 'Unauthorised',         meta = null) { return new DomainError(message, 'UNAUTHORISED', meta); }
+  static badRequest(message = 'Bad request',            meta = null) { return new DomainError(message, 'BAD_REQUEST',  meta); }
+  static internal(message   = 'Internal error',         meta = null) { return new DomainError(message, 'INTERNAL',     meta); }
+
+  is(code) { return this.code === code; }
+}
+
+module.exports = { DomainError };
+EOF
+
+cat <<'EOF' > src/shared/errors/index.js
+'use strict';
+module.exports = { ...require('./domainError') };
+EOF
+
+# ---------------------------------------------------------
+# 11. Shared - Utils
+# ---------------------------------------------------------
+echo "ðŸ› ï¸ Creating shared/utils/..."
+
+cat <<'EOF' > src/shared/utils/id.js
+'use strict';
+
+const { v4: uuidv4 } = require('uuid');
+const { DomainError } = require('../errors/domainError');
+
+function generateId()  { return uuidv4(); }
+
+function isValidId(id) {
+  return typeof id === 'string' &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id);
+}
+
+function assertValidId(id, label = 'id') {
+  if (!isValidId(id)) throw DomainError.badRequest(`Invalid ${label}: "${id}" is not a valid UUID`);
+  return id;
+}
+
+module.exports = { generateId, isValidId, assertValidId };
+EOF
+
+cat <<'EOF' > src/shared/utils/time.js
+'use strict';
+
+function now()                    { return new Date(); }
+function toISOString(d = new Date()) { return d instanceof Date ? d.toISOString() : new Date(d).toISOString(); }
+function addSeconds(d, n)         { return new Date(d.getTime() + n * 1_000); }
+function addMinutes(d, n)         { return new Date(d.getTime() + n * 60_000); }
+function addDays(d, n)            { return new Date(d.getTime() + n * 86_400_000); }
+function isExpired(d)             { return new Date(d).getTime() < Date.now(); }
+function diffSeconds(a, b)        { return Math.floor((new Date(a).getTime() - new Date(b).getTime()) / 1_000); }
+
+module.exports = { now, toISOString, addSeconds, addMinutes, addDays, isExpired, diffSeconds };
+EOF
+
+cat <<'EOF' > src/shared/utils/index.js
+'use strict';
+module.exports = { ...require('./id'), ...require('./time') };
+EOF
+
+# ---------------------------------------------------------
+# 12. Shared - Validation
+# ---------------------------------------------------------
+echo "Creating shared/validation/..."
+
+cat <<'EOF' > src/shared/validation/validate.js
+'use strict';
+
+const { DomainError } = require('../errors/domainError');
+
+function validate(schema, data) {
+  const result = schema.safeParse(data);
+  if (!result.success) {
+    const details = result.error.errors.map((e) => ({ field: e.path.join('.'), message: e.message }));
+    throw DomainError.validation('Validation failed', details);
+  }
+  return result.data;
+}
+
+module.exports = { validate };
+EOF
+
+cat <<'EOF' > src/shared/validation/index.js
+'use strict';
+module.exports = { ...require('./validate') };
+EOF
+
+cat <<'EOF' > src/shared/index.js
+'use strict';
+module.exports = {
+  ...require('./errors'),
+  ...require('./utils'),
+  ...require('./validation'),
+};
+EOF
+
+# ---------------------------------------------------------
+# 13. HTTP - Errors
+# ---------------------------------------------------------
+echo "ðŸ›¡ï¸ Creating http/errors/..."
+
+cat <<'EOF' > src/http/errors/httpError.js
+'use strict';
+
+class HttpError extends Error {
+  constructor(status, message, details = null) {
+    super(message);
+    this.name    = 'HttpError';
+    this.status  = status;
+    this.details = details;
+    Error.captureStackTrace(this, this.constructor);
+  }
+}
+
+module.exports = { HttpError };
+EOF
+
+cat <<'EOF' > src/http/errors/mapper.js
+'use strict';
+
+const { HttpError }   = require('./httpError');
+const { DomainError } = require('../../shared/errors/domainError');
+
+function mapToHttpError(err) {
+  if (err instanceof HttpError)  return err;
+  if (err instanceof DomainError) {
+    const statusMap = {
+      NOT_FOUND: 404, FORBIDDEN: 403, CONFLICT: 409,
+      VALIDATION: 422, UNAUTHORISED: 401, BAD_REQUEST: 400, INTERNAL: 500,
+    };
+    return new HttpError(statusMap[err.code] ?? 400, err.message, err.meta);
+  }
+  return new HttpError(500, 'Internal server error');
+}
+
+module.exports = { mapToHttpError };
+EOF
+
+cat <<'EOF' > src/http/errors/index.js
+'use strict';
+
+const { logger }       = require('../../infrastructure/logger');
+const { mapToHttpError } = require('./mapper');
+
+// eslint-disable-next-line no-unused-vars
+function errorHandler(err, req, res, next) {
+  const httpErr = mapToHttpError(err);
+  if (httpErr.status >= 500) logger.error('Unhandled error', { requestId: req.requestId, stack: err.stack });
+  return res.status(httpErr.status).json({
+    success: false,
+    error: {
+      message: httpErr.message,
+      ...(httpErr.details ? { details: httpErr.details } : {}),
+      ...(process.env.NODE_ENV !== 'production' && httpErr.status >= 500 ? { stack: err.stack } : {}),
+    },
+  });
+}
+
+module.exports = {
+  errorHandler,
+  HttpError:    require('./httpError').HttpError,
+  mapToHttpError: require('./mapper').mapToHttpError,
+};
+EOF
+
+# ---------------------------------------------------------
+# 14. HTTP - Middlewares
+# ---------------------------------------------------------
+echo "ðŸ›¡ï¸ Creating http/middlewares/..."
+
+cat <<'EOF' > src/http/middlewares/auth.js
+'use strict';
+
+const jwt           = require('jsonwebtoken');
+const { HttpError } = require('../errors/httpError');
+
+function authMiddleware(req, _res, next) {
+  const header = req.headers['authorization'] || '';
+  const [scheme, token] = header.split(' ');
+  if (scheme !== 'Bearer' || !token) return next(new HttpError(401, 'Missing or malformed token'));
+  try {
+    req.auth = jwt.verify(token, process.env.JWT_SECRET);
+    next();
+  } catch {
+    next(new HttpError(401, 'Invalid or expired token'));
+  }
+}
+
+module.exports = authMiddleware;
+EOF
+
+cat <<'EOF' > src/http/middlewares/rateLimit.js
+'use strict';
+
+const rateLimit = require('express-rate-limit');
+
+const rateLimitMiddleware = rateLimit({
+  windowMs:       parseInt(process.env.RATE_LIMIT_WINDOW_MS || '900000', 10),
+  max:            parseInt(process.env.RATE_LIMIT_MAX       || '100',    10),
+  standardHeaders: true,
+  legacyHeaders:   false,
+  message: { success: false, error: { message: 'Too many requests, please try again later.' } },
+});
+
+module.exports = rateLimitMiddleware;
+EOF
+
+cat <<'EOF' > src/http/middlewares/requestContext.js
+'use strict';
+
+const { v4: uuidv4 } = require('uuid');
+const { logger }     = require('../../infrastructure/logger');
+
+function requestContextMiddleware(req, res, next) {
+  const requestId = req.headers['x-request-id'] || uuidv4();
+  req.requestId   = requestId;
+  res.setHeader('x-request-id', requestId);
+  const startAt = Date.now();
+  res.on('finish', () => logger.info('HTTP request', {
+    requestId, method: req.method, url: req.originalUrl, status: res.statusCode, ms: Date.now() - startAt,
+  }));
+  next();
+}
+
+module.exports = requestContextMiddleware;
+EOF
+
+cat <<'EOF' > src/http/middlewares/BaseMiddleware.js
+'use strict';
+
+const { HttpError } = require('../errors/httpError');
+
+class BaseMiddleware {
+  static wrap(fn) { return (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next); }
+
+  requireAuth() {
+    return BaseMiddleware.wrap(async (req, _res, next) => {
+      if (!req.auth) return next(new HttpError(401, 'Authentication required'));
       next();
-    } catch (error) {
-      return res.status(401).json({
-        success: false,
-        message: 'Invalid or expired token'
-      });
+    });
+  }
+
+  requireRole(...roles) {
+    return BaseMiddleware.wrap(async (req, _res, next) => {
+      if (!req.auth || !roles.includes(req.auth.role)) return next(new HttpError(403, 'Insufficient permissions'));
+      next();
+    });
+  }
+
+  // eslint-disable-next-line no-unused-vars
+  async resolveOwnerId(_req) { return null; }
+
+  requireOwnership() {
+    return BaseMiddleware.wrap(async (req, _res, next) => {
+      const ownerId = await this.resolveOwnerId(req);
+      const subject = req.auth?.sub;
+      if (!subject || subject !== (ownerId ?? req.params?.id)) return next(new HttpError(403, 'Access denied'));
+      next();
+    });
+  }
+}
+
+module.exports = { BaseMiddleware };
+EOF
+
+cat <<'EOF' > src/http/middlewares/index.js
+'use strict';
+module.exports = {
+  authMiddleware:         require('./auth'),
+  rateLimitMiddleware:    require('./rateLimit'),
+  requestContextMiddleware: require('./requestContext'),
+  BaseMiddleware:         require('./BaseMiddleware').BaseMiddleware,
+};
+EOF
+
+# ---------------------------------------------------------
+# 15. HTTP - Response
+# ---------------------------------------------------------
+echo "ðŸ›¡ï¸ Creating http/response/..."
+
+cat <<'EOF' > src/http/response/index.js
+'use strict';
+
+function ok(res, data = null, meta = {})  { return res.status(200).json({ success: true, data, meta }); }
+function created(res, data = null)        { return res.status(201).json({ success: true, data, meta: {} }); }
+function noContent(res)                   { return res.status(204).send(); }
+function paginated(res, { items, total, page, limit }) {
+  return res.status(200).json({ success: true, data: items, meta: { total, page, limit, pages: Math.ceil(total / limit) } });
+}
+function fail(res, status, message, details = null) {
+  const body = { success: false, error: { message } };
+  if (details) body.error.details = details;
+  return res.status(status).json(body);
+}
+
+module.exports = { ok, created, noContent, paginated, fail };
+EOF
+
+cat <<'EOF' > src/http/index.js
+'use strict';
+module.exports = {
+  ...require('./errors'),
+  ...require('./middlewares'),
+  response: require('./response'),
+};
+EOF
+
+# ---------------------------------------------------------
+# 16. App - Config
+# ---------------------------------------------------------
+echo "ðŸ§© Creating app/config/..."
+
+cat <<'EOF' > src/app/config/features.js
+'use strict';
+
+const features = {
+  emailVerification: process.env.FEATURE_EMAIL_VERIFICATION === 'true',
+  rateLimiting:      process.env.FEATURE_RATE_LIMITING      !== 'false',
+  auditLog:          process.env.FEATURE_AUDIT_LOG          === 'true',
+};
+
+module.exports = { features };
+EOF
+
+cat <<'EOF' > src/app/config/policies.js
+'use strict';
+
+const policies = {
+  'users:read':   (auth) => !!auth,
+  'users:write':  (auth) => auth && (auth.role === 'admin' || auth.sub === auth.targetId),
+  'users:delete': (auth) => auth && auth.role === 'admin',
+  'store:read':   (auth) => !!auth,
+  'store:write':  (auth) => auth && (auth.role === 'admin' || auth.role === 'store_owner'),
+  'store:delete': (auth) => auth && auth.role === 'admin',
+  'auth:manage':  (auth) => auth && auth.role === 'admin',
+};
+
+function can(auth, policy, resource = null) {
+  const check = policies[policy];
+  if (!check) return false;
+  return !!check(auth, resource);
+}
+
+module.exports = { policies, can };
+EOF
+
+cat <<'EOF' > src/app/config/index.js
+'use strict';
+module.exports = { ...require('./features'), ...require('./policies') };
+EOF
+
+# ---------------------------------------------------------
+# 17. App - Container
+# ---------------------------------------------------------
+echo "ðŸ§© Creating app/container/..."
+
+cat <<'EOF' > src/app/container/index.js
+'use strict';
+
+class Container {
+  constructor() { this._bindings = new Map(); this._singletons = new Map(); }
+
+  register(token, factory) { this._bindings.set(token, { factory, scope: 'transient' }); return this; }
+  singleton(token, factory){ this._bindings.set(token, { factory, scope: 'singleton' }); return this; }
+  instance(token, value)   {
+    this._singletons.set(token, value);
+    this._bindings.set(token, { factory: () => value, scope: 'singleton' });
+    return this;
+  }
+
+  resolve(token) {
+    if (!this._bindings.has(token)) throw new Error(`[Container] No binding for token: "${token}"`);
+    const binding = this._bindings.get(token);
+    if (binding.scope === 'singleton') {
+      if (!this._singletons.has(token)) this._singletons.set(token, binding.factory(this));
+      return this._singletons.get(token);
+    }
+    return binding.factory(this);
+  }
+
+  verify() {
+    for (const [token, b] of this._bindings) {
+      if (b.scope === 'singleton') this.resolve(token);
     }
   }
-
-  validate(schema) {
-    return (req, res, next) => {
-      const { error } = schema.validate(req.body, { abortEarly: false });
-
-      if (error) {
-        return res.status(400).json({
-          success: false,
-          message: 'Validation error',
-          errors: error.details.map(d => d.message)
-        });
-      }
-
-      next();
-    };
-  }
-
-  errorHandler(err, req, res, next) {
-    console.error('💥 Error:', err);
-
-    const statusCode = err.statusCode || 500;
-    const message = err.message || 'Internal Server Error';
-
-    res.status(statusCode).json({
-      success: false,
-      error: {
-        message,
-        ...(process.env.NODE_ENV === 'development' && { stack: err.stack })
-      }
-    });
-  }
-
-  notFound(req, res) {
-    res.status(404).json({
-      success: false,
-      message: 'Route not found'
-    });
-  }
 }
 
-module.exports = new Middlewares();
-EOF
+const container = new Container();
 
-touch src/http/errors.js
-touch src/http/response.js
-
-# ---------------------------------------------------------
-# 14. App Layer
-# ---------------------------------------------------------
-echo "🧩 Creating app layer..."
-touch src/app/config.js
-touch src/app/dispatch.js
-touch src/app/container.js
-
-# ---------------------------------------------------------
-# 15. Shared
-# ---------------------------------------------------------
-echo "🛠️ Creating shared utilities..."
-
-cat <<EOF > src/shared/utils.js
-class ApiResponse {
-  static success(res, data, message = 'Success', statusCode = 200) {
-    return res.status(statusCode).json({
-      success: true,
-      message,
-      data
-    });
-  }
-
-  static error(res, message = 'Error', statusCode = 500) {
-    return res.status(statusCode).json({
-      success: false,
-      message
-    });
-  }
-
-  static created(res, data, message = 'Created') {
-    return this.success(res, data, message, 201);
-  }
+function bootContainer() {
+  require('./providers').register(container);
+  container.verify();
+  return container;
 }
 
-module.exports = ApiResponse;
+module.exports = { Container, container, bootContainer };
 EOF
 
-cat <<EOF > src/shared/time.js
-const formatDate = (date) => {
-  return new Date(date).toISOString();
-};
+cat <<'EOF' > src/app/container/providers.js
+'use strict';
 
-const addDays = (date, days) => {
-  const result = new Date(date);
-  result.setDate(result.getDate() + days);
-  return result;
-};
+const { db }          = require('../../infrastructure/database/postgresql');
+const { redisClient } = require('../../infrastructure/cache/redis');
+const { logger }      = require('../../infrastructure/logger');
+const { bus }         = require('../../infrastructure/eventbus');
+const { Dispatcher }  = require('../dispatch');
+const { registerHandlers } = require('../dispatch/handlers');
+// [AUTO-IMPORTS]
 
-module.exports = { formatDate, addDays };
+function register(container) {
+  // â”€â”€ Infrastructure â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  container.instance('db',          db);
+  container.instance('redisClient', redisClient);
+  container.instance('logger',      logger);
+  container.instance('bus',         bus);
+
+  container.singleton('dispatcher', (c) => {
+    const d = new Dispatcher(c.resolve('bus'));
+    registerHandlers(d);
+    return d;
+  });
+
+  // â”€â”€ Repositories â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // [AUTO-REPOS]
+
+  // â”€â”€ Services â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // [AUTO-SERVICES]
+}
+
+module.exports = { register };
 EOF
 
-touch src/shared/validate.js
-touch src/shared/id.js
-touch src/shared/errors.js
+# ---------------------------------------------------------
+# 18. App - Dispatch
+# ---------------------------------------------------------
+echo "ðŸ§© Creating app/dispatch/..."
 
-# ---------------------------------------------------------
-# 16. Modules (single-file class-based)
-# ---------------------------------------------------------
-echo "📦 Creating module stubs..."
-touch src/modules/users/users.module.js
-touch src/modules/auth/auth.module.js
-touch src/modules/health/health.module.js
+cat <<'EOF' > src/app/dispatch/index.js
+'use strict';
 
-# ---------------------------------------------------------
+const { bus }              = require('../../infrastructure/eventbus');
+const { registerHandlers } = require('./handlers');
+
+class Dispatcher {
+  constructor(eventBus) { this._handlers = new Map(); this._bus = eventBus; }
+
+  on(event, handler) {
+    if (!this._handlers.has(event)) this._handlers.set(event, []);
+    this._handlers.get(event).push(handler);
+    return this;
+  }
+
+  async dispatch(event, payload) {
+    const handlers = this._handlers.get(event) ?? [];
+    await Promise.all(handlers.map((h) => h(payload)));
+    await this._bus.publish(event, payload);
+  }
+
+  registeredEvents() { return [...this._handlers.keys()]; }
+}
+
+const dispatcher = new Dispatcher(bus);
+registerHandlers(dispatcher);
+
+module.exports = { Dispatcher, dispatcher, registerHandlers };
+EOF
+
+cat <<'EOF' > src/app/dispatch/handlers.js
+'use strict';
+
+const { logger } = require('../../infrastructure/logger');
+
+/**
+ * Register all application-level domain event handlers.
+ * Add new handlers here as the application grows.
+ * @param {import('./index').Dispatcher} dispatcher
+ */
+function registerHandlers(dispatcher) {
+  // â”€â”€ Add module event handlers below â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // dispatcher.on('user.created', async (payload) => { ... });
+  void dispatcher; // remove when first handler is added
+}
+
+module.exports = { registerHandlers };
+EOF
+
+cat <<'EOF' > src/app/index.js
+'use strict';
+module.exports = {
+  ...require('./config'),
+  ...require('./container'),
+  ...require('./dispatch'),
+};
+EOF
+
 # 17. Bootstrap - Router
 # ---------------------------------------------------------
 echo "🌟 Creating bootstrap/router.js..."
-cat <<EOF > src/bootstrap/router.js
-const express = require('express');
-const router = express.Router();
+cat <<'EOF' > src/bootstrap/router.js
+'use strict';
 
-// Mount module routers here
-// Example:
-// const UsersModule = require('../modules/users/users.module');
-// router.use('/users', new UsersModule().router);
+const { Router } = require('express');
+// [AUTO-ROUTES]
 
-router.get('/health', (req, res) => {
-  res.json({ success: true, message: 'API is running' });
+const router = Router();
+
+// [AUTO-USE]
+
+// 404 - unmatched API route
+router.use((_req, res) => {
+  res.status(404).json({ success: false, error: { message: 'API endpoint not found' } });
 });
 
 module.exports = router;
@@ -722,35 +1406,74 @@ EOF
 # ---------------------------------------------------------
 echo "🔌 Creating bootstrap/app.js..."
 cat <<EOF > src/bootstrap/app.js
-const express = require('express');
-const helmet = require('helmet');
-const cors = require('cors');
-const config = require('../infrastructure/env');
-const logger = require('../infrastructure/logger');
-const middlewares = require('../http/middlewares');
-const router = require('./router');
+"use strict";
 
-const app = express();
+const express = require("express");
+const helmet = require("helmet");
+const cors = require("cors");
+const compression = require("compression");
 
-// Security & Parsing
-app.use(helmet());
-app.use(cors());
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+const {
+  requestContextMiddleware,
+  rateLimitMiddleware,
+} = require("../http/middlewares");
+const { errorHandler } = require("../http/errors");
+const { features } = require("../app/config");
+const router = require("./router");
 
-// Logging
-if (config.server.env === 'development') {
-  app.use(logger);
+function createApp() {
+  const app = express();
+
+  // ── Security & parsing ──────────────────────────────────────────────────
+  app.use(helmet());
+  app.use(
+    cors({
+      origin: process.env.CORS_ORIGIN
+        ? process.env.CORS_ORIGIN.split(",")
+        : "*",
+      credentials: process.env.CORS_CREDENTIALS === "true",
+      methods: ["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
+    }),
+  );
+  app.use(compression());
+  app.use(express.json({ limit: "1mb" }));
+  app.use(express.urlencoded({ extended: true }));
+
+  // ── Observability ───────────────────────────────────────────────────────
+  app.use(requestContextMiddleware);
+
+  // ── Rate limiting (feature-flag controlled) ─────────────────────────────
+  if (features.rateLimiting) {
+    app.use(rateLimitMiddleware);
+  }
+
+  // ── Health check ────────────────────────────────────────────────────────
+  app.get("/health", (_req, res) => {
+    res.json({
+      status: "ok",
+      env: process.env.NODE_ENV,
+      ts: Date.now(),
+      uptime: Math.floor(process.uptime()),
+    });
+  });
+
+  // ── API routes ──────────────────────────────────────────────────────────
+  app.use("/api", router);
+
+  // ── 404 – unknown routes ────────────────────────────────────────────────
+  app.use((_req, res) => {
+    res
+      .status(404)
+      .json({ success: false, error: { message: "Route not found" } });
+  });
+
+  // ── Global error handler (must be last) ─────────────────────────────────
+  app.use(errorHandler);
+
+  return app;
 }
 
-// API Routes
-app.use(config.server.apiPrefix, router);
-
-// Error Handling
-app.use(middlewares.notFound);
-app.use(middlewares.errorHandler);
-
-module.exports = app;
+module.exports = { createApp };
 EOF
 
 # ---------------------------------------------------------
@@ -758,43 +1481,88 @@ EOF
 # ---------------------------------------------------------
 echo "🚀 Creating bootstrap/server.js..."
 cat <<EOF > src/bootstrap/server.js
-const app = require('./app');
-const config = require('../infrastructure/env');
-const db = require('../infrastructure/db/postgres/pg');
-const { connectRedis } = require('../infrastructure/db/redis/client');
+"use strict";
 
-const startServer = async () => {
-  try {
-    // Connect to PostgreSQL
-    await db.init();
+require("dotenv").config();
 
-    // Connect to Redis (Optional)
-    try {
-      await connectRedis();
-    } catch (error) {
-      console.warn('⚠️  Redis not connected, continuing without cache...');
-    }
+const { validateEnv } = require("../infrastructure/env");
+const {
+  connectPostgres,
+  disconnectPostgres,
+} = require("../infrastructure/database/postgresql");
+const {
+  connectRedis,
+  disconnectRedis,
+} = require("../infrastructure/cache/redis");
+const { closeAllQueues } = require("../infrastructure/queue");
+const { logger } = require("../infrastructure/logger");
+const { bootContainer } = require("../app/container");
+const { createApp } = require("./app");
 
-    // Start Server
-    const PORT = config.server.port;
-    app.listen(PORT, () => {
-      console.log(\`🚀 Server running on port \${PORT}\`);
-      console.log(\`📡 Environment: \${config.server.env}\`);
-      console.log(\`🔗 API Base: \${config.server.apiPrefix}\`);
+async function start() {
+  // ── 1. Validate environment ──────────────────────────────────────────────
+  validateEnv();
+
+  // ── 2. Connect infrastructure ────────────────────────────────────────────
+  await connectPostgres();
+  await connectRedis();
+
+  // ── 3. Wire DI container ─────────────────────────────────────────────────
+  bootContainer();
+
+  // ── 4. Start HTTP server ─────────────────────────────────────────────────
+  const app = createApp();
+  const port = parseInt(process.env.PORT || "3000", 10);
+  const server = app.listen(port, () => {
+    logger.info(`Server listening on port ${port}`, {
+      env: process.env.NODE_ENV,
+    });
+  });
+
+  // ── 5. Graceful shutdown ─────────────────────────────────────────────────
+  async function shutdown(signal) {
+    logger.info(`${signal} received – shutting down gracefully`);
+
+    // Stop accepting new connections
+    server.close(async () => {
+      logger.info("HTTP server closed");
+      try {
+        await disconnectPostgres();
+        await disconnectRedis();
+        await closeAllQueues();
+        logger.info("Infrastructure connections closed");
+        process.exit(0);
+      } catch (err) {
+        logger.error("Error during shutdown", { err });
+        process.exit(1);
+      }
     });
 
-  } catch (error) {
-    console.error('❌ Failed to start server:', error);
-    process.exit(1);
+    // Force-kill if graceful shutdown exceeds 10 s
+    setTimeout(() => {
+      logger.error("Graceful shutdown timed out – forcing exit");
+      process.exit(1);
+    }, 10_000).unref();
   }
-};
 
-process.on('unhandledRejection', (err) => {
-  console.error('💥 Unhandled Rejection:', err);
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+  process.on("SIGINT", () => shutdown("SIGINT"));
+
+  // ── 6. Safety nets ───────────────────────────────────────────────────────
+  process.on("unhandledRejection", (reason) => {
+    logger.error("Unhandled promise rejection", { reason });
+  });
+
+  process.on("uncaughtException", (err) => {
+    logger.error("Uncaught exception – shutting down", { err });
+    shutdown("uncaughtException");
+  });
+}
+
+start().catch((err) => {
+  console.error("Fatal startup error:", err);
   process.exit(1);
 });
-
-startServer();
 EOF
 
 # =========================================================
@@ -803,199 +1571,574 @@ EOF
 echo "🔨 Creating module.sh tool..."
 
 cat <<'MAKER_EOF' > module.sh
-#!/bin/bash
-MODULE_NAME=$1
+#!/usr/bin/env bash
+# =============================================================
+#  Usage:  bash module.sh <module-name> [route-prefix]
+#  Creates a full module scaffold under src/modules/<name>/
+#  and auto-registers the route in src/bootstrap/router.js
+# =============================================================
+set -euo pipefail
 
-if [ -z "$MODULE_NAME" ]; then
-  echo "❌ Usage: ./module.sh <module_name>"
-  echo "Example: ./module.sh users"
-  exit 1
+MODULE="${1:?Usage: bash module.sh <module-name> [route-prefix]}"
+ROUTE="${2:-$1}"
+
+# ── Name derivations ─────────────────────────────────────────
+LOWER="$(echo "$MODULE" | tr '[:upper:] -' '[:lower:]_')"
+PASCAL="$(echo "$LOWER" | awk -F_ '{r=""; for(i=1;i<=NF;i++) r=r toupper(substr($i,1,1)) substr($i,2); print r}')"
+ROUTE_PREFIX="$(echo "$ROUTE" | tr '[:upper:]' '[:lower:]')"
+
+SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/src"
+DEST="$SRC/modules/$LOWER"
+ROUTER_FILE="$SRC/bootstrap/router.js"
+
+[[ -d "$DEST" ]] && { echo "❌  Module '$LOWER' already exists."; exit 1; }
+echo "⚙  Scaffolding '$LOWER' → /v1/$ROUTE_PREFIX …"
+
+mkdir -p "$DEST" "$DEST/DTO" "$DEST/models" "$DEST/repository" \
+         "$DEST/service" "$DEST/controller" "$DEST/middleware" "$DEST/router"
+
+# ── index.js ─────────────────────────────────────────────────
+cat > "$DEST/index.js" << EOF
+'use strict';
+
+/**
+ * Public API of the ${LOWER} module.
+ * Only these exports should be consumed by other modules.
+ * Direct access to internals breaks encapsulation.
+ */
+module.exports = {
+  ${PASCAL}Service:    require('./service').${PASCAL}Service,
+  ${PASCAL}Repository: require('./repository').${PASCAL}Repository,
+  ${PASCAL}Model:      require('./models').${PASCAL},
+  ${LOWER}Routes:      require('./router'),
+};
+EOF
+
+# ── Auto-register in bootstrap/router.js ─────────────────────
+IMPORT_LINE="const { ${LOWER}Routes } = require('../modules/${LOWER}');"
+MOUNT_LINE="router.use('/v1/${ROUTE_PREFIX}', ${LOWER}Routes);"
+REGISTER_COMMENT="// Register additional module routers here:"
+
+if grep -qF "$IMPORT_LINE" "$ROUTER_FILE"; then
+  echo "⚠   Route already registered in router.js — skipped."
+else
+  # Insert import after the last require line
+  sed -i "s|const router = Router();|${IMPORT_LINE}\n\nconst router = Router();|" "$ROUTER_FILE"
+  # Insert mount before the register comment (or at end before module.exports)
+  if grep -qF "$REGISTER_COMMENT" "$ROUTER_FILE"; then
+    sed -i "s|${REGISTER_COMMENT}|router.use('/v1/${ROUTE_PREFIX}', ${LOWER}Routes);\n\n${REGISTER_COMMENT}|" "$ROUTER_FILE"
+  else
+    sed -i "s|module.exports = router;|${MOUNT_LINE}\n\nmodule.exports = router;|" "$ROUTER_FILE"
+  fi
+  echo "✔   Registered /v1/${ROUTE_PREFIX} in bootstrap/router.js"
 fi
 
-CAP_NAME="$(tr '[:lower:]' '[:upper:]' <<< ${MODULE_NAME:0:1})${MODULE_NAME:1}"
-DIR="src/modules/$MODULE_NAME"
+# ── Done ──────────────────────────────────────────────────────
+echo ""
+echo "✅  Module '${LOWER}' scaffolded at src/modules/${LOWER}/"
+echo ""
+echo "   Files created:"
+echo "   ├── index.js"
+echo "   ├── DTO/           (create · update · param · query · validate)"
+echo "   ├── models/        (${LOWER}.model.js)"
+echo "   ├── repository/    (${LOWER}.repository.js · queries.js)"
+echo "   ├── service/       (${LOWER}.service.js)"
+echo "   ├── controller/    (${LOWER}.controller.js)"
+echo "   ├── middleware/    (${LOWER}.middleware.js)"
+echo "   └── router/        (index.js)"
+echo ""
+# ── Auto-register in app/container/providers.js ─────────────
+PROVIDERS_FILE="$SRC/app/container/providers.js"
 
-if [ -d "$DIR" ]; then
-  echo "❌ Module '$MODULE_NAME' already exists!"
-  exit 1
+if grep -qF "[AUTO-IMPORTS]" "$PROVIDERS_FILE" 2>/dev/null; then
+  if grep -qF "${LOWER}Repository" "$PROVIDERS_FILE"; then
+    echo "⚠   ${PASCAL} already registered in providers.js — skipped."
+  else
+    TMP_SCRIPT="$(mktemp)"
+    cat > "$TMP_SCRIPT" << 'NODEJS'
+const fs     = require('fs');
+const file   = process.argv[2];
+const lower  = process.argv[3];
+const pascal = process.argv[4];
+
+let src = fs.readFileSync(file, 'utf8');
+
+const importLines =
+  `const { ${pascal}Repository } = require('../../modules/${lower}/repository');\n` +
+  `const { ${pascal}Service }    = require('../../modules/${lower}/service');\n`;
+
+const repoLine =
+  `  container.singleton(\n` +
+  `    '${lower}Repository',\n` +
+  `    (c) => new ${pascal}Repository(c.resolve('db')),\n` +
+  `  );\n`;
+
+const serviceLine =
+  `  container.singleton(\n` +
+  `    '${lower}Service',\n` +
+  `    (c) => new ${pascal}Service(c.resolve('${lower}Repository'), c.resolve('dispatcher')),\n` +
+  `  );\n`;
+
+src = src.replace('// [AUTO-IMPORTS]', importLines + '// [AUTO-IMPORTS]');
+src = src.replace('  // [AUTO-REPOS]',    repoLine    + '  // [AUTO-REPOS]');
+src = src.replace('  // [AUTO-SERVICES]', serviceLine + '  // [AUTO-SERVICES]');
+
+fs.writeFileSync(file, src, 'utf8');
+NODEJS
+    node "$TMP_SCRIPT" "$PROVIDERS_FILE" "$LOWER" "$PASCAL"
+    rm -f "$TMP_SCRIPT"
+
+    echo "✔   Registered ${LOWER}Repository + ${LOWER}Service in providers.js"
+  fi
+else
+  echo "⚠   providers.js missing AUTO markers — add manually:"
+  echo "      container.singleton('${LOWER}Repository', (c) => new ${PASCAL}Repository(c.resolve('db')));"
+  echo "      container.singleton('${LOWER}Service',     (c) => new ${PASCAL}Service(c.resolve('${LOWER}Repository'), c.resolve('dispatcher')));"
 fi
 
-mkdir -p "$DIR"
-echo "🚀 Creating module: $MODULE_NAME..."
+echo "   Next steps:"
+echo "   1. Edit DTO fields   → src/modules/${LOWER}/DTO/create.dto.js"
+echo "   2. Edit model fields → src/modules/${LOWER}/models/${LOWER}.model.js"
+echo "   3. Edit SQL queries  → src/modules/${LOWER}/repository/queries.js"
+echo ""
 
-cat <<EOD > "$DIR/$MODULE_NAME.module.js"
-const express = require('express');
-const ApiResponse = require('../../shared/utils');
-const middlewares = require('../../http/middlewares');
-const db = require('../../infrastructure/db/postgres/pg');
+# ── DTO/create.dto.js ────────────────────────────────────────
+cat > "$DEST/DTO/create.dto.js" << EOF
+'use strict';
 
-// ── Queries ──────────────────────────────────────────────
-const qry = {
-  findAll:  'SELECT * FROM ${MODULE_NAME}s ORDER BY created_at DESC LIMIT \$1 OFFSET \$2',
-  findById: 'SELECT * FROM ${MODULE_NAME}s WHERE id = \$1',
-  create:   'INSERT INTO ${MODULE_NAME}s (title, description) VALUES (\$1, \$2) RETURNING *',
-  update:   'UPDATE ${MODULE_NAME}s SET title = \$1, description = \$2 WHERE id = \$3 RETURNING *',
-  delete:   'DELETE FROM ${MODULE_NAME}s WHERE id = \$1 RETURNING id',
+const { Type } = require('@sinclair/typebox');
+
+/** Input schema for creating a ${PASCAL}. TODO: adjust fields. */
+const Create${PASCAL}Dto = Type.Object({
+  name: Type.String({ minLength: 1, maxLength: 255 }),
+});
+
+module.exports = { Create${PASCAL}Dto };
+EOF
+
+# ── DTO/update.dto.js ────────────────────────────────────────
+cat > "$DEST/DTO/update.dto.js" << EOF
+'use strict';
+
+const { Type } = require('@sinclair/typebox');
+
+/** Input schema for updating a ${PASCAL}. All fields optional. */
+const Update${PASCAL}Dto = Type.Object({
+  name: Type.Optional(Type.String({ minLength: 1, maxLength: 255 })),
+});
+
+module.exports = { Update${PASCAL}Dto };
+EOF
+
+# ── DTO/param.dto.js ─────────────────────────────────────────
+cat > "$DEST/DTO/param.dto.js" << EOF
+'use strict';
+
+const { Type } = require('@sinclair/typebox');
+
+const ${PASCAL}ParamDto = Type.Object({
+  id: Type.String({ format: 'uuid' }),
+});
+
+module.exports = { ${PASCAL}ParamDto };
+EOF
+
+# ── DTO/query.dto.js ─────────────────────────────────────────
+cat > "$DEST/DTO/query.dto.js" << EOF
+'use strict';
+
+const { Type } = require('@sinclair/typebox');
+
+const ${PASCAL}ListQueryDto = Type.Object({
+  page:  Type.Optional(Type.Integer({ minimum: 1, default: 1 })),
+  limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100, default: 20 })),
+});
+
+module.exports = { ${PASCAL}ListQueryDto };
+EOF
+
+# ── DTO/validate.js (quoted: no var expansion needed) ────────
+cat > "$DEST/DTO/validate.js" << 'EOF'
+'use strict';
+
+const { Value }       = require('@sinclair/typebox/value');
+const { DomainError } = require('../../../shared/errors/domainError');
+
+/**
+ * Returns an Express middleware that validates req[source] against
+ * a TypeBox schema. On success it coerces / defaults values in place.
+ *
+ * @param {import('@sinclair/typebox').TObject} schema
+ * @param {'body'|'params'|'query'} [source='body']
+ */
+function validate(schema, source = 'body') {
+  return (req, _res, next) => {
+    const data = req[source] ?? {};
+    if (!Value.Check(schema, data)) {
+      const details = [...Value.Errors(schema, data)].map((e) => ({
+        field:   e.path,
+        message: e.message,
+      }));
+      return next(DomainError.validation('Validation failed', details));
+    }
+    req[source] = Value.Cast(schema, data);
+    next();
+  };
+}
+
+module.exports = { validate };
+EOF
+
+# ── DTO/index.js ─────────────────────────────────────────────
+cat > "$DEST/DTO/index.js" << EOF
+'use strict';
+
+module.exports = {
+  ...require('./create.dto'),
+  ...require('./update.dto'),
+  ...require('./param.dto'),
+  ...require('./query.dto'),
+  validate: require('./validate').validate,
+};
+EOF
+
+# ── models/<name>.model.js ───────────────────────────────────
+cat > "$DEST/models/${LOWER}.model.js" << EOF
+'use strict';
+
+const { generateId } = require('../../../shared/utils/id');
+const { now }        = require('../../../shared/utils/time');
+
+class ${PASCAL} {
+  constructor({ id, name, createdAt, updatedAt }) {
+    this.id        = id        || generateId();
+    this.name      = ${PASCAL}._normaliseName(name);
+    this.createdAt = createdAt || now();
+    this.updatedAt = updatedAt || now();
+  }
+
+  // ── Normalisation ──────────────────────────────────────────
+  static _normaliseName(v) {
+    return typeof v === 'string' ? v.trim().replace(/\s+/g, ' ') : v;
+  }
+
+  // ── Factories ─────────────────────────────────────────────
+
+  /** Reconstruct entity from a PostgreSQL row (snake_case → camelCase). */
+  static fromRecord(row) {
+    return new ${PASCAL}({
+      id:        row.id,
+      name:      row.name,
+      createdAt: new Date(row.created_at),
+      updatedAt: new Date(row.updated_at),
+    });
+  }
+
+  // ── Domain behaviour ──────────────────────────────────────
+
+  /** Apply a validated update DTO onto this entity in-place. */
+  applyUpdate(dto) {
+    if (dto.name !== undefined) this.name = ${PASCAL}._normaliseName(dto.name);
+    this.updatedAt = now();
+  }
+
+  // ── Serialisation ─────────────────────────────────────────
+
+  /** Persist-ready record (camelCase → snake_case). */
+  toRecord() {
+    return {
+      id:         this.id,
+      name:       this.name,
+      created_at: this.createdAt,
+      updated_at: this.updatedAt,
+    };
+  }
+
+  /** Safe public serialisation — no internal/sensitive fields. */
+  toResponse() {
+    return {
+      id:        this.id,
+      name:      this.name,
+      createdAt: this.createdAt instanceof Date ? this.createdAt.toISOString() : this.createdAt,
+      updatedAt: this.updatedAt instanceof Date ? this.updatedAt.toISOString() : this.updatedAt,
+    };
+  }
+}
+
+module.exports = { ${PASCAL} };
+EOF
+
+cat > "$DEST/models/index.js" << EOF
+'use strict';
+module.exports = require('./${LOWER}.model');
+EOF
+
+# ── repository/queries.js ────────────────────────────────────
+cat > "$DEST/repository/queries.js" << EOF
+'use strict';
+
+// TODO: verify TABLE matches your migration file
+const TABLE = '${LOWER}s';
+
+const QUERIES = {
+  FIND_BY_ID: 'SELECT * FROM ' + TABLE + ' WHERE id = \$1 LIMIT 1',
+  FIND_ALL:   'SELECT * FROM ' + TABLE + ' ORDER BY created_at DESC LIMIT \$1 OFFSET \$2',
+  COUNT:      'SELECT COUNT(*)::int AS total FROM ' + TABLE,
+  CREATE:     'INSERT INTO ' + TABLE + ' (id, name, created_at, updated_at) VALUES (\$1, \$2, \$3, \$4) RETURNING *',
+  UPDATE:     'UPDATE '     + TABLE + ' SET name = COALESCE(\$1, name), updated_at = \$2 WHERE id = \$3 RETURNING *',
+  DELETE:     'DELETE FROM ' + TABLE + ' WHERE id = \$1',
 };
 
-// ── Repository ───────────────────────────────────────────
-class ${CAP_NAME}Repository {
-  async findAll(limit = 10, offset = 0) {
-    return await db.execute(qry.findAll, [limit, offset]);
+module.exports = { QUERIES };
+EOF
+
+# ── repository/<name>.repository.js ─────────────────────────
+cat > "$DEST/repository/${LOWER}.repository.js" << EOF
+'use strict';
+
+const { ${PASCAL} }   = require('../models');
+const { QUERIES }     = require('./queries');
+const { DomainError } = require('../../../shared/errors/domainError');
+const { now }         = require('../../../shared/utils/time');
+
+class ${PASCAL}Repository {
+  /** @param {{ query: Function }} db  pg pool wrapper */
+  constructor(db) {
+    this._db = db;
   }
 
   async findById(id) {
-    const rows = await db.execute(qry.findById, [id]);
-    return rows[0] || null;
+    const res = await this._db.query(QUERIES.FIND_BY_ID, [id]);
+    if (!res.rows.length) throw DomainError.notFound('${PASCAL} not found');
+    return ${PASCAL}.fromRecord(res.rows[0]);
   }
 
-  async create(data) {
-    const rows = await db.execute(qry.create, [data.title, data.description]);
-    return rows[0];
+  async findAll({ limit, offset }) {
+    const res = await this._db.query(QUERIES.FIND_ALL, [limit, offset]);
+    return res.rows.map((r) => ${PASCAL}.fromRecord(r));
   }
 
-  async update(id, data) {
-    const rows = await db.execute(qry.update, [data.title, data.description, id]);
-    return rows[0] || null;
+  async count() {
+    const res = await this._db.query(QUERIES.COUNT);
+    return res.rows[0].total;
+  }
+
+  async create(entity) {
+    const r   = entity.toRecord();
+    const res = await this._db.query(QUERIES.CREATE, [r.id, r.name, r.created_at, r.updated_at]);
+    return ${PASCAL}.fromRecord(res.rows[0]);
+  }
+
+  async update(id, { name = null }) {
+    const res = await this._db.query(QUERIES.UPDATE, [name, now(), id]);
+    if (!res.rows.length) throw DomainError.notFound('${PASCAL} not found');
+    return ${PASCAL}.fromRecord(res.rows[0]);
   }
 
   async delete(id) {
-    const rows = await db.execute(qry.delete, [id]);
-    return rows[0] || null;
+    await this._db.query(QUERIES.DELETE, [id]);
   }
 }
 
-// ── Service ──────────────────────────────────────────────
-class ${CAP_NAME}Service {
-  constructor() {
-    this.repo = new ${CAP_NAME}Repository();
+module.exports = { ${PASCAL}Repository };
+EOF
+
+cat > "$DEST/repository/index.js" << EOF
+'use strict';
+module.exports = {
+  ...require('./${LOWER}.repository'),
+  QUERIES: require('./queries').QUERIES,
+};
+EOF
+
+# ── service/<name>.service.js ────────────────────────────────
+cat > "$DEST/service/${LOWER}.service.js" << EOF
+'use strict';
+
+const { ${PASCAL} } = require('../models');
+
+class ${PASCAL}Service {
+  /**
+   * @param {import('../repository').${PASCAL}Repository} repository
+   * @param {import('../../../app/dispatch').Dispatcher}  dispatcher
+   */
+  constructor(repository, dispatcher) {
+    this._repo       = repository;
+    this._dispatcher = dispatcher;
   }
 
-  async getAll(page = 1, limit = 10) {
-    const offset = (page - 1) * limit;
-    return await this.repo.findAll(limit, offset);
+  async create(dto) {
+    const entity  = new ${PASCAL}(dto);
+    const created = await this._repo.create(entity);
+    await this._dispatcher.dispatch('${LOWER}.created', created.toResponse());
+    return created.toResponse();
   }
 
   async getById(id) {
-    const item = await this.repo.findById(id);
-    if (!item) {
-      const error = new Error('${CAP_NAME} not found');
-      error.statusCode = 404;
-      throw error;
-    }
-    return item;
+    const entity = await this._repo.findById(id);
+    return entity.toResponse();
   }
 
-  async create(data) {
-    return await this.repo.create(data);
+  async list({ page = 1, limit = 20 } = {}) {
+    const offset = (page - 1) * limit;
+    const [items, total] = await Promise.all([
+      this._repo.findAll({ limit, offset }),
+      this._repo.count(),
+    ]);
+    return { items: items.map((e) => e.toResponse()), total, page, limit };
   }
 
-  async update(id, data) {
-    const item = await this.repo.update(id, data);
-    if (!item) {
-      const error = new Error('${CAP_NAME} not found');
-      error.statusCode = 404;
-      throw error;
-    }
-    return item;
+  async update(id, dto) {
+    const entity  = await this._repo.findById(id);
+    entity.applyUpdate(dto);
+    const updated = await this._repo.update(id, { name: entity.name });
+    return updated.toResponse();
   }
 
   async delete(id) {
-    const item = await this.repo.delete(id);
-    if (!item) {
-      const error = new Error('${CAP_NAME} not found');
-      error.statusCode = 404;
-      throw error;
-    }
-    return item;
+    await this._repo.delete(id);
+    await this._dispatcher.dispatch('${LOWER}.deleted', { id });
   }
 }
 
-// ── Controller ───────────────────────────────────────────
-class ${CAP_NAME}Controller {
-  constructor() {
-    this.service = new ${CAP_NAME}Service();
-  }
+module.exports = { ${PASCAL}Service };
+EOF
 
-  async getAll(req, res, next) {
-    try {
-      const page  = parseInt(req.query.page)  || 1;
-      const limit = parseInt(req.query.limit) || 10;
-      const data = await this.service.getAll(page, limit);
-      ApiResponse.success(res, data);
-    } catch (error) { next(error); }
-  }
+cat > "$DEST/service/index.js" << EOF
+'use strict';
+module.exports = require('./${LOWER}.service');
+EOF
 
-  async getById(req, res, next) {
-    try {
-      const data = await this.service.getById(req.params.id);
-      ApiResponse.success(res, data);
-    } catch (error) { next(error); }
-  }
+# ── controller/<name>.controller.js ─────────────────────────
+cat > "$DEST/controller/${LOWER}.controller.js" << EOF
+'use strict';
 
-  async create(req, res, next) {
-    try {
-      const data = await this.service.create(req.body);
-      ApiResponse.created(res, data, '${CAP_NAME} created successfully');
-    } catch (error) { next(error); }
-  }
+const { ok, created, noContent, paginated } = require('../../../http/response');
+const { container } = require('../../../app/container');
 
-  async update(req, res, next) {
-    try {
-      const data = await this.service.update(req.params.id, req.body);
-      ApiResponse.success(res, data, '${CAP_NAME} updated successfully');
-    } catch (error) { next(error); }
-  }
+function getService() {
+  return container.resolve('${LOWER}Service');
+}
 
-  async delete(req, res, next) {
-    try {
-      await this.service.delete(req.params.id);
-      ApiResponse.success(res, null, '${CAP_NAME} deleted successfully');
-    } catch (error) { next(error); }
+async function create(req, res, next) {
+  try {
+    return created(res, await getService().create(req.body));
+  } catch (err) { next(err); }
+}
+
+async function getById(req, res, next) {
+  try {
+    return ok(res, await getService().getById(req.params.id));
+  } catch (err) { next(err); }
+}
+
+async function list(req, res, next) {
+  try {
+    const page  = Number(req.query.page  || 1);
+    const limit = Number(req.query.limit || 20);
+    return paginated(res, await getService().list({ page, limit }));
+  } catch (err) { next(err); }
+}
+
+async function update(req, res, next) {
+  try {
+    return ok(res, await getService().update(req.params.id, req.body));
+  } catch (err) { next(err); }
+}
+
+async function remove(req, res, next) {
+  try {
+    await getService().delete(req.params.id);
+    return noContent(res);
+  } catch (err) { next(err); }
+}
+
+module.exports = { create, getById, list, update, remove };
+EOF
+
+cat > "$DEST/controller/index.js" << EOF
+'use strict';
+module.exports = require('./${LOWER}.controller');
+EOF
+
+# ── middleware/<name>.middleware.js ──────────────────────────
+cat > "$DEST/middleware/${LOWER}.middleware.js" << EOF
+'use strict';
+
+const { BaseMiddleware } = require('../../../http/middlewares/BaseMiddleware');
+const { HttpError }      = require('../../../http/errors/httpError');
+
+class ${PASCAL}Middleware extends BaseMiddleware {
+  /**
+   * Ensure the authenticated user owns the requested resource.
+   * Default: compares req.params.id to req.auth.sub.
+   * Override resolveOwnerId() for custom ownership logic.
+   */
+  requireOwner() {
+    return BaseMiddleware.wrap(async (req, _res, next) => {
+      if (req.params.id !== req.auth?.sub) {
+        return next(new HttpError(403, 'Access denied'));
+      }
+      next();
+    });
   }
 }
 
-// ── Module ───────────────────────────────────────────────
-class ${CAP_NAME}Module {
-  constructor() {
-    this.controller = new ${CAP_NAME}Controller();
-    this.router = express.Router();
-    this._registerRoutes();
-  }
+/** Singleton instance for direct use in the router. */
+const ${LOWER}Middleware = new ${PASCAL}Middleware();
 
-  _registerRoutes() {
-    const c = this.controller;
+module.exports = { ${PASCAL}Middleware, ${LOWER}Middleware };
+EOF
 
-    this.router.get('/',       (req, res, next) => c.getAll(req, res, next));
-    this.router.get('/:id',    (req, res, next) => c.getById(req, res, next));
-    this.router.post('/',      middlewares.auth, (req, res, next) => c.create(req, res, next));
-    this.router.put('/:id',    middlewares.auth, (req, res, next) => c.update(req, res, next));
-    this.router.delete('/:id', middlewares.auth, (req, res, next) => c.delete(req, res, next));
-  }
-}
+cat > "$DEST/middleware/index.js" << EOF
+'use strict';
+module.exports = require('./${LOWER}.middleware');
+EOF
 
-module.exports = ${CAP_NAME}Module;
-EOD
+# ── router/index.js ──────────────────────────────────────────
+cat > "$DEST/router/index.js" << EOF
+'use strict';
 
-echo ""
-echo "✅ Module '$MODULE_NAME' created successfully!"
-echo ""
-echo "📁 Generated files:"
-echo "   src/modules/${MODULE_NAME}/"
-echo "   └── ${MODULE_NAME}.module.js"
-echo ""
-echo "📝 Next steps:"
-echo "   Add to src/bootstrap/router.js:"
-echo "      const ${CAP_NAME}Module = require('../modules/${MODULE_NAME}/${MODULE_NAME}.module');"
-echo "      router.use('/${MODULE_NAME}', new ${CAP_NAME}Module().router);"
-echo ""
-echo "   Endpoints:"
-echo "      GET    /api/v1/${MODULE_NAME}"
-echo "      GET    /api/v1/${MODULE_NAME}/:id"
-echo "      POST   /api/v1/${MODULE_NAME}"
-echo "      PUT    /api/v1/${MODULE_NAME}/:id"
-echo "      DELETE /api/v1/${MODULE_NAME}/:id"
-echo ""
+const { Router }         = require('express');
+const ctrl               = require('../controller');
+const { validate }       = require('../DTO/validate');
+const { authMiddleware } = require('../../../http/middlewares');
+const {
+  Create${PASCAL}Dto,
+  Update${PASCAL}Dto,
+  ${PASCAL}ParamDto,
+  ${PASCAL}ListQueryDto,
+} = require('../DTO');
+
+const router = Router();
+
+// ── Public ───────────────────────────────────────────────────
+router.post('/',
+  validate(Create${PASCAL}Dto, 'body'),
+  ctrl.create);
+
+// ── Protected ────────────────────────────────────────────────
+router.use(authMiddleware);
+
+router.get('/',
+  validate(${PASCAL}ListQueryDto, 'query'),
+  ctrl.list);
+
+router.get('/:id',
+  validate(${PASCAL}ParamDto, 'params'),
+  ctrl.getById);
+
+router.patch('/:id',
+  validate(${PASCAL}ParamDto, 'params'),
+  validate(Update${PASCAL}Dto, 'body'),
+  ctrl.update);
+
+router.delete('/:id',
+  validate(${PASCAL}ParamDto, 'params'),
+  ctrl.remove);
+
+module.exports = router;
+EOF
 MAKER_EOF
 
 chmod +x module.sh
@@ -1006,29 +2149,3 @@ chmod +x module.sh
 echo ""
 echo "📥 Installing dependencies..."
 npm install
-
-echo ""
-echo "✅✅✅ Project Ready! ✅✅✅"
-echo ""
-echo "📁 Structure:"
-echo "   ├── .gitignore"
-echo "   ├── module.sh"
-echo "   └── src/"
-echo "       ├── bootstrap/        🚀 app.js · server.js · router.js"
-echo "       ├── http/             🌐 middlewares.js · errors.js · response.js"
-echo "       ├── app/              🧩 config.js · dispatch.js · container.js"
-echo "       ├── config/           ⚙️  pg.config.js"
-echo "       ├── infrastructure/   🏗️  env · logger"
-echo "       │   └── db/"
-echo "       │       ├── postgres/ 🐘 pg.js · errors.js"
-echo "       │       └── redis/    🔴 client.js"
-echo "       ├── modules/          📦 users · auth · health"
-echo "       └── shared/           🛠️  utils · validate · id · time · errors"
-echo ""
-echo "🚀 Quick Start:"
-echo "   cd $PROJECT_NAME"
-echo "   npm run dev"
-echo ""
-echo "📦 Create Module:"
-echo "   ./module.sh products"
-echo ""

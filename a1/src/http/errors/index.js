@@ -1,7 +1,7 @@
-'use strict';
+"use strict";
 
-const { logger }       = require('../../infrastructure/logger');
-const { mapToHttpError } = require('./mapper');
+const { logger } = require("../../infrastructure/logger");
+const { mapToHttpError } = require("./mapper");
 
 /**
  * Express 4-argument error-handling middleware.
@@ -12,9 +12,9 @@ function errorHandler(err, req, res, next) {
   const httpErr = mapToHttpError(err);
 
   if (httpErr.status >= 500) {
-    logger.error('Unhandled error', {
+    logger.error("Unhandled error", {
       requestId: req.requestId,
-      stack:     err.stack,
+      stack: err.stack,
     });
   }
 
@@ -23,11 +23,15 @@ function errorHandler(err, req, res, next) {
     error: {
       message: httpErr.message,
       ...(httpErr.details ? { details: httpErr.details } : {}),
-      ...(process.env.NODE_ENV !== 'production' && httpErr.status >= 500
+      ...(process.env.NODE_ENV !== "production" && httpErr.status >= 500
         ? { stack: err.stack }
         : {}),
     },
   });
 }
 
-module.exports = { errorHandler, ...require('./httpError'), ...require('./mapper') };
+module.exports = {
+  errorHandler,
+  HttpError: require("./httpError").HttpError,
+  mapToHttpError: require("./mapper").mapToHttpError,
+};

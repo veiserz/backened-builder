@@ -1,4 +1,4 @@
-'use strict';
+"use strict";
 
 /**
  * Lightweight synchronous DI container.
@@ -10,34 +10,36 @@
  */
 class Container {
   constructor() {
-    this._bindings   = new Map();
+    this._bindings = new Map();
     this._singletons = new Map();
   }
 
   register(token, factory) {
-    this._bindings.set(token, { factory, scope: 'transient' });
+    this._bindings.set(token, { factory, scope: "transient" });
     return this;
   }
 
   singleton(token, factory) {
-    this._bindings.set(token, { factory, scope: 'singleton' });
+    this._bindings.set(token, { factory, scope: "singleton" });
     return this;
   }
 
   instance(token, value) {
     this._singletons.set(token, value);
-    this._bindings.set(token, { factory: () => value, scope: 'singleton' });
+    this._bindings.set(token, { factory: () => value, scope: "singleton" });
     return this;
   }
 
   resolve(token) {
     if (!this._bindings.has(token)) {
-      throw new Error(`[Container] No binding registered for token: "${token}"`);
+      throw new Error(
+        `[Container] No binding registered for token: "${token}"`,
+      );
     }
 
     const binding = this._bindings.get(token);
 
-    if (binding.scope === 'singleton') {
+    if (binding.scope === "singleton") {
       if (!this._singletons.has(token)) {
         this._singletons.set(token, binding.factory(this));
       }
@@ -50,7 +52,7 @@ class Container {
   /** Verify all registered singletons can be constructed. */
   verify() {
     for (const [token, binding] of this._bindings) {
-      if (binding.scope === 'singleton') {
+      if (binding.scope === "singleton") {
         this.resolve(token);
       }
     }
@@ -59,8 +61,14 @@ class Container {
 
 const container = new Container();
 
+/**
+ * Wire all bindings and verify every singleton can be constructed.
+ * Call once during application startup — after infrastructure (DB / Redis) is connected.
+ * @returns {Container}
+ */
 function bootContainer() {
-  require('./providers').register(container);
+  require("./providers").register(container);
+  container.verify();
   return container;
 }
 

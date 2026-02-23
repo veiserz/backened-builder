@@ -1,0 +1,136 @@
+# ============================================================
+# Loki Production Configuration (single-node, filesystem storage)
+# For multi-node/HA, migrate to S3/GCS object storage.
+# ============================================================
+
+auth_enabled: false # Set true only for multi-tenant setups
+
+server:
+  http_listen_port: 3100
+  grpc_listen_port: 9096
+  log_level: warn
+  # Reduce log noise from Loki itself
+  log_format: json
+  grpc_server_max_recv_msg_size: 8388608 # 8 MB
+  grpc_server_max_send_msg_size: 8388608
+
+common:
+  path_prefix: /loki
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+  replication_factor: 1
+  ring:
+    instance_addr: 127.0.0.1
+    kvstore:
+      store: inmemory
+
+# ── Schema ──────────────────────────────────────────────────
+# TSDB is the recommended store for Loki 2.8+.
+# The `from` date must be in the past. Only change schema
+# via a new entry — never modify an existing row.
+schema_config:
+  configs:
+    - from: 2024-01-01
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+# ── Ingester ────────────────────────────────────────────────
+ingester:
+  # Flush chunks to storage after 1h of inactivity
+  chunk_idle_period: 1h
+  max_chunk_age: 2h
+  # Target uncompressed chunk size before flushing (~1 MB compressed)
+  chunk_target_size: 1572864
+  chunk_retain_period: 30s
+  # WAL for crash safety
+  wal:
+    enabled: true
+    dir: /loki/wal
+    flush_on_shutdown: true
+
+# ── Limits (global defaults) ────────────────────────────────
+# Tune per-tenant via per_tenant_override_config for multi-tenant.
+limits_config:
+  # ── Retention
+  retention_period: 744h # 31 days — balance cost vs. debuggability
+
+  # ── Cardinality protection (most important tuning knob)
+  max_label_names_per_series: 15
+  max_label_value_length: 2048
+  max_streams_per_user: 0 # 0 = unlimited at global level; enforce at ingester
+  max_global_streams_per_user: 10000
+
+  # ── Ingestion rate limits
+  ingestion_rate_mb: 16 # Sustained ingestion rate per tenant
+  ingestion_burst_size_mb: 32 # Short burst allowance
+
+  # ── Per-stream rate limiting (protects against a single noisy stream)
+  per_stream_rate_limit: 3MB
+  per_stream_rate_limit_burst: 15MB
+
+  # ── Line size
+  max_line_size: 262144 # 256 KB — drop lines larger than this
+
+  # ── Query limits
+  max_entries_limit_per_query: 5000
+  max_query_length: 721h # 30 days + 1h buffer
+  max_query_parallelism: 16
+  query_timeout: 120s
+
+  # ── Reject logs from the future (clock skew tolerance)
+  reject_old_samples: true
+  reject_old_samples_max_age: 168h # 7 days
+
+  # ── Split & cache
+  split_queries_by_interval: 30m
+
+# ── Compactor ───────────────────────────────────────────────
+# Handles compaction + retention deletion.
+compactor:
+  working_directory: /loki/compactor
+  retention_enabled: true
+  retention_delete_delay: 2h
+  retention_delete_worker_count: 150
+  delete_request_store: filesystem
+
+# ── Query range / cache ─────────────────────────────────────
+query_range:
+  results_cache:
+    cache:
+      embedded_cache:
+        enabled: true
+        max_size_mb: 150
+        ttl: 1h
+  cache_results: true
+  parallelise_shardable_queries: true
+
+# ── Querier ─────────────────────────────────────────────────
+querier:
+  max_concurrent: 16
+
+# ── Ruler (alerting) ────────────────────────────────────────
+ruler:
+  storage:
+    type: local
+    local:
+      directory: /loki/rules
+  rule_path: /loki/rules-temp
+  # Set to your Alertmanager if available; otherwise alerts surface in Grafana only
+  # alertmanager_url: http://alertmanager:9093
+  ring:
+    kvstore:
+      store: inmemory
+  enable_api: true
+  enable_alertmanager_v2: true
+  evaluation_interval: 1m
+  poll_interval: 1m
+
+# ── Analytics opt-out ───────────────────────────────────────
+analytics:
+  reporting_enabled: false
