@@ -1,0 +1,137 @@
+# ============================================================
+# Loki Ruler — Alerting Rules
+# Evaluated by Loki's built-in ruler on the ruler.evaluation_interval.
+# Place this file in /loki/rules/{tenant}/rules.yml
+# For single-tenant (auth_enabled: false) use tenant "fake":
+#   /loki/rules/fake/app-alerts.yml
+# ============================================================
+
+groups:
+  # ── Application Error Rate ────────────────────────────────
+  - name: app_error_rate
+    interval: 1m
+    rules:
+      - alert: HighErrorRate
+        # Fire if error log rate exceeds 0.5 errors/sec over 5 min
+        expr: |
+          sum by (app, env) (
+            rate({job="docker"} | json | level="error" [5m])
+          ) > 0.5
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "High error rate — {{ $labels.app }} ({{ $labels.env }})"
+          description: >
+            {{ $labels.app }} in {{ $labels.env }} is logging
+            {{ $value | printf "%.2f" }} errors/sec (threshold: 0.5/sec).
+            Investigate at: https://grafana.example.com/explore
+
+      - alert: ElevatedErrorRate
+        # Warn if error rate is elevated but below critical threshold
+        expr: |
+          sum by (app, env) (
+            rate({job="docker"} | json | level="error" [5m])
+          ) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Elevated error rate — {{ $labels.app }}"
+          description: >
+            {{ $labels.app }} error rate is {{ $value | printf "%.2f" }}/sec
+            (warn threshold: 0.1/sec).
+
+  # ── App Silence (crash / deployment gap detection) ────────
+  - name: app_availability
+    interval: 1m
+    rules:
+      - alert: AppNotLogging
+        # Fire if no logs at all for 5 minutes from a specific container
+        expr: |
+          sum by (app, env) (
+            rate({job="docker", app=~".+"} [5m])
+          ) == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "No logs from {{ $labels.app }} — possible crash"
+          description: >
+            No log lines received from {{ $labels.app }} ({{ $labels.env }})
+            in the last 5 minutes. The container may have crashed or stopped.
+
+  # ── HTTP 5xx Detection ────────────────────────────────────
+  - name: http_errors
+    interval: 1m
+    rules:
+      - alert: High5xxRate
+        # Requires your pino http logger to emit: { "status": 500, "msg": "request completed" }
+        expr: |
+          sum by (app) (
+            rate({job="docker"} | json | status >= 500 [5m])
+          ) > 0.2
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "5xx spike in {{ $labels.app }}"
+          description: >
+            {{ $labels.app }} is returning {{ $value | printf "%.2f" }} 5xx/sec.
+
+      - alert: High4xxRate
+        # High client error rate can indicate bad deployments or attack
+        expr: |
+          (
+            sum by (app) (rate({job="docker"} | json | status >= 400 | status < 500 [5m]))
+            /
+            sum by (app) (rate({job="docker"} | json | msg="request completed" [5m]))
+          ) > 0.15
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High 4xx rate in {{ $labels.app }}"
+          description: >
+            {{ $labels.app }} 4xx ratio is {{ $value | humanizePercentage }}
+            of total requests (threshold: 15%).
+
+  # ── Slow Requests ─────────────────────────────────────────
+  - name: performance
+    interval: 5m
+    rules:
+      - alert: SlowP95Latency
+        # Requires pino to emit: { "responseTime": 1234 } (ms)
+        expr: |
+          quantile_over_time(0.95,
+            {job="docker"} | json | unwrap responseTime [10m]
+          ) by (app) > 3000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "P95 latency degraded in {{ $labels.app }}"
+          description: >
+            P95 response time in {{ $labels.app }} is {{ $value | humanizeDuration }}
+            (threshold: 3s).
+
+  # ── Log Volume Anomaly ────────────────────────────────────
+  - name: log_volume
+    interval: 5m
+    rules:
+      - alert: LogVolumeSpike
+        # Detects sudden 10x spike in log volume (noisy service / infinite loop)
+        expr: |
+          (
+            sum by (app) (rate({job="docker"} [5m]))
+            /
+            sum by (app) (rate({job="docker"} [1h] offset 5m))
+          ) > 10
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Log volume spike in {{ $labels.app }}"
+          description: >
+            {{ $labels.app }} log rate is {{ $value | printf "%.1f" }}x the 1h baseline.
+            Possible loop, misconfiguration, or debug logging left on.

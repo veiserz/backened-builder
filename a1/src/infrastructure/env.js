@@ -11,6 +11,12 @@ const env = {
   REDIS_HOST: process.env.REDIS_HOST || null,
   REDIS_PORT: process.env.REDIS_PORT || "6379",
   JWT_SECRET: process.env.JWT_SECRET || null,
+  GRAFANA_ADMIN_USER: process.env.GRAFANA_ADMIN_USER || "admin",
+  GRAFANA_ADMIN_PASSWORD: process.env.GRAFANA_ADMIN_PASSWORD || "CHANGE_ME_STRONG_PASSWORD",
+  GRAFANA_ROOT_URL: process.env.GRAFANA_ROOT_URL || "https://grafana.example.com",
+  GRAFANA_DOMAIN: process.env.GRAFANA_DOMAIN || "grafana.example.com",
+  SLACK_WEBHOOK_URL: process.env.SLACK_WEBHOOK_URL || "https://hooks.slack.com/services/CHANGE/ME",
+  ALERT_EMAIL_TO: process.env.ALERT_EMAIL_TO || "ops@example.com"
 };
 
 const required = [

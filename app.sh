@@ -1610,26 +1610,21 @@ module.exports = {
   ${PASCAL}Service:    require('./service').${PASCAL}Service,
   ${PASCAL}Repository: require('./repository').${PASCAL}Repository,
   ${PASCAL}Model:      require('./models').${PASCAL},
-  ${LOWER}Routes:      require('./router'),
+  createRouter:        require('./router').createRouter,
 };
 EOF
 
 # ── Auto-register in bootstrap/router.js ─────────────────────
-IMPORT_LINE="const { ${LOWER}Routes } = require('../modules/${LOWER}');"
-MOUNT_LINE="router.use('/v1/${ROUTE_PREFIX}', ${LOWER}Routes);"
-REGISTER_COMMENT="// Register additional module routers here:"
+# The refactored router.js exports createRouter(container) and uses
+# [AUTO-ROUTES-IMPORT] and [AUTO-USE] markers.
+IMPORT_LINE="const { createRouter: create${PASCAL}Router } = require('../modules/${LOWER}');"
+MOUNT_LINE="  router.use('/v1/${ROUTE_PREFIX}', create${PASCAL}Router(container.resolve('${LOWER}Service')));"
 
-if grep -qF "$IMPORT_LINE" "$ROUTER_FILE"; then
+if grep -qF "create${PASCAL}Router" "$ROUTER_FILE"; then
   echo "⚠   Route already registered in router.js — skipped."
 else
-  # Insert import after the last require line
-  sed -i "s|const router = Router();|${IMPORT_LINE}\n\nconst router = Router();|" "$ROUTER_FILE"
-  # Insert mount before the register comment (or at end before module.exports)
-  if grep -qF "$REGISTER_COMMENT" "$ROUTER_FILE"; then
-    sed -i "s|${REGISTER_COMMENT}|router.use('/v1/${ROUTE_PREFIX}', ${LOWER}Routes);\n\n${REGISTER_COMMENT}|" "$ROUTER_FILE"
-  else
-    sed -i "s|module.exports = router;|${MOUNT_LINE}\n\nmodule.exports = router;|" "$ROUTER_FILE"
-  fi
+  sed -i "s|// \[AUTO-ROUTES-IMPORT\]|${IMPORT_LINE}\n// [AUTO-ROUTES-IMPORT]|" "$ROUTER_FILE"
+  sed -i "s|  // \[AUTO-USE\]|${MOUNT_LINE}\n  // [AUTO-USE]|" "$ROUTER_FILE"
   echo "✔   Registered /v1/${ROUTE_PREFIX} in bootstrap/router.js"
 fi
 
@@ -1647,53 +1642,64 @@ echo "   ├── controller/    (${LOWER}.controller.js)"
 echo "   ├── middleware/    (${LOWER}.middleware.js)"
 echo "   └── router/        (index.js)"
 echo ""
-# ── Auto-register in app/container/providers.js ─────────────
-PROVIDERS_FILE="$SRC/app/container/providers.js"
 
-if grep -qF "[AUTO-IMPORTS]" "$PROVIDERS_FILE" 2>/dev/null; then
-  if grep -qF "${LOWER}Repository" "$PROVIDERS_FILE"; then
-    echo "⚠   ${PASCAL} already registered in providers.js — skipped."
+# ── Auto-register in app/container/providers/ ────────────────
+# The refactored structure splits providers into three files.
+# We patch repositories.js and services.js independently.
+REPOS_FILE="$SRC/app/container/providers/repositories.js"
+SERVICES_FILE="$SRC/app/container/providers/services.js"
+
+if [[ -f "$REPOS_FILE" && -f "$SERVICES_FILE" ]]; then
+  if grep -qF "${LOWER}Repository" "$REPOS_FILE"; then
+    echo "⚠   ${PASCAL} already registered in providers — skipped."
   else
     TMP_SCRIPT="$(mktemp)"
     cat > "$TMP_SCRIPT" << 'NODEJS'
 const fs     = require('fs');
-const file   = process.argv[2];
-const lower  = process.argv[3];
-const pascal = process.argv[4];
+const lower  = process.argv[2];
+const pascal = process.argv[3];
+const reposFile    = process.argv[4];
+const servicesFile = process.argv[5];
 
-let src = fs.readFileSync(file, 'utf8');
+// ── repositories.js ──────────────────────────────────────────
+let reposSrc = fs.readFileSync(reposFile, 'utf8');
 
-const importLines =
-  `const { ${pascal}Repository } = require('../../modules/${lower}/repository');\n` +
-  `const { ${pascal}Service }    = require('../../modules/${lower}/service');\n`;
+const repoImport =
+  `const { ${pascal}Repository } = require('../../../modules/${lower}/repository');\n`;
 
-const repoLine =
-  `  container.singleton(\n` +
-  `    '${lower}Repository',\n` +
-  `    (c) => new ${pascal}Repository(c.resolve('db')),\n` +
-  `  );\n`;
+const repoBinding =
+  `  c.singleton('${lower}Repository', ({ resolve }) => new ${pascal}Repository(resolve('db')));\n`;
 
-const serviceLine =
-  `  container.singleton(\n` +
-  `    '${lower}Service',\n` +
-  `    (c) => new ${pascal}Service(c.resolve('${lower}Repository'), c.resolve('dispatcher')),\n` +
-  `  );\n`;
+reposSrc = reposSrc.replace('// [AUTO-REPO-IMPORTS]', repoImport + '// [AUTO-REPO-IMPORTS]');
+reposSrc = reposSrc.replace('  // [AUTO-REPOS]',      repoBinding + '  // [AUTO-REPOS]');
 
-src = src.replace('// [AUTO-IMPORTS]', importLines + '// [AUTO-IMPORTS]');
-src = src.replace('  // [AUTO-REPOS]',    repoLine    + '  // [AUTO-REPOS]');
-src = src.replace('  // [AUTO-SERVICES]', serviceLine + '  // [AUTO-SERVICES]');
+fs.writeFileSync(reposFile, reposSrc, 'utf8');
 
-fs.writeFileSync(file, src, 'utf8');
+// ── services.js ──────────────────────────────────────────────
+let servicesSrc = fs.readFileSync(servicesFile, 'utf8');
+
+const serviceImport =
+  `const { ${pascal}Service } = require('../../../modules/${lower}/service');\n`;
+
+const serviceBinding =
+  `  c.singleton('${lower}Service', ({ resolve }) => new ${pascal}Service(resolve('${lower}Repository'), resolve('dispatcher')));\n`;
+
+servicesSrc = servicesSrc.replace('// [AUTO-SERVICE-IMPORTS]', serviceImport + '// [AUTO-SERVICE-IMPORTS]');
+servicesSrc = servicesSrc.replace('  // [AUTO-SERVICES]',      serviceBinding + '  // [AUTO-SERVICES]');
+
+fs.writeFileSync(servicesFile, servicesSrc, 'utf8');
 NODEJS
-    node "$TMP_SCRIPT" "$PROVIDERS_FILE" "$LOWER" "$PASCAL"
+    node "$TMP_SCRIPT" "$LOWER" "$PASCAL" "$REPOS_FILE" "$SERVICES_FILE"
     rm -f "$TMP_SCRIPT"
-
-    echo "✔   Registered ${LOWER}Repository + ${LOWER}Service in providers.js"
+    echo "✔   Registered ${LOWER}Repository in providers/repositories.js"
+    echo "✔   Registered ${LOWER}Service    in providers/services.js"
   fi
 else
-  echo "⚠   providers.js missing AUTO markers — add manually:"
-  echo "      container.singleton('${LOWER}Repository', (c) => new ${PASCAL}Repository(c.resolve('db')));"
-  echo "      container.singleton('${LOWER}Service',     (c) => new ${PASCAL}Service(c.resolve('${LOWER}Repository'), c.resolve('dispatcher')));"
+  echo "⚠   providers/repositories.js or providers/services.js not found — add manually:"
+  echo "      // in providers/repositories.js:"
+  echo "      c.singleton('${LOWER}Repository', ({ resolve }) => new ${PASCAL}Repository(resolve('db')));"
+  echo "      // in providers/services.js:"
+  echo "      c.singleton('${LOWER}Service', ({ resolve }) => new ${PASCAL}Service(resolve('${LOWER}Repository'), resolve('dispatcher')));"
 fi
 
 echo "   Next steps:"
@@ -1702,104 +1708,62 @@ echo "   2. Edit model fields → src/modules/${LOWER}/models/${LOWER}.model.js"
 echo "   3. Edit SQL queries  → src/modules/${LOWER}/repository/queries.js"
 echo ""
 
-# ── DTO/create.dto.js ────────────────────────────────────────
-cat > "$DEST/DTO/create.dto.js" << EOF
-'use strict';
+# ── DTO/index.js ─────────────────────────────────────────────
+cat > "$DEST/DTO/index.js" << EOF
 
-const { Type } = require('@sinclair/typebox');
+// src/modules/store/DTO/index.js
+"use strict";
 
-/** Input schema for creating a ${PASCAL}. TODO: adjust fields. */
-const Create${PASCAL}Dto = Type.Object({
-  name: Type.String({ minLength: 1, maxLength: 255 }),
+const { Type } = require("@sinclair/typebox");
+
+// ── Create ────────────────────────────────────────────────────────────────────
+
+const CreateStoreDto = Type.Object({
+  name: Type.String({
+    minLength: 1,
+    maxLength: 255,
+    description: "Store display name",
+  }),
 });
 
-module.exports = { Create${PASCAL}Dto };
-EOF
+// ── Update ────────────────────────────────────────────────────────────────────
 
-# ── DTO/update.dto.js ────────────────────────────────────────
-cat > "$DEST/DTO/update.dto.js" << EOF
-'use strict';
-
-const { Type } = require('@sinclair/typebox');
-
-/** Input schema for updating a ${PASCAL}. All fields optional. */
-const Update${PASCAL}Dto = Type.Object({
+const UpdateStoreDto = Type.Object({
   name: Type.Optional(Type.String({ minLength: 1, maxLength: 255 })),
 });
 
-module.exports = { Update${PASCAL}Dto };
-EOF
+// ── URL Params ────────────────────────────────────────────────────────────────
 
-# ── DTO/param.dto.js ─────────────────────────────────────────
-cat > "$DEST/DTO/param.dto.js" << EOF
-'use strict';
-
-const { Type } = require('@sinclair/typebox');
-
-const ${PASCAL}ParamDto = Type.Object({
-  id: Type.String({ format: 'uuid' }),
+const StoreParamDto = Type.Object({
+  id: Type.String({ format: "uuid" }),
 });
 
-module.exports = { ${PASCAL}ParamDto };
-EOF
+// ── List Query ────────────────────────────────────────────────────────────────
 
-# ── DTO/query.dto.js ─────────────────────────────────────────
-cat > "$DEST/DTO/query.dto.js" << EOF
-'use strict';
-
-const { Type } = require('@sinclair/typebox');
-
-const ${PASCAL}ListQueryDto = Type.Object({
-  page:  Type.Optional(Type.Integer({ minimum: 1, default: 1 })),
+const StoreListQueryDto = Type.Object({
+  page: Type.Optional(Type.Integer({ minimum: 1, default: 1 })),
   limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100, default: 20 })),
 });
 
-module.exports = { ${PASCAL}ListQueryDto };
-EOF
+// ── Response (for JSDoc typing only — not used for validation) ────────────────
 
-# ── DTO/validate.js (quoted: no var expansion needed) ────────
-cat > "$DEST/DTO/validate.js" << 'EOF'
-'use strict';
+const StoreResponseDto = Type.Object({
+  id: Type.String({ format: "uuid" }),
+  name: Type.String(),
+  createdAt: Type.String({ format: "date-time" }),
+  updatedAt: Type.String({ format: "date-time" }),
+});
 
-const { Value }       = require('@sinclair/typebox/value');
-const { DomainError } = require('../../../shared/errors/domainError');
-
-/**
- * Returns an Express middleware that validates req[source] against
- * a TypeBox schema. On success it coerces / defaults values in place.
- *
- * @param {import('@sinclair/typebox').TObject} schema
- * @param {'body'|'params'|'query'} [source='body']
- */
-function validate(schema, source = 'body') {
-  return (req, _res, next) => {
-    const data = req[source] ?? {};
-    if (!Value.Check(schema, data)) {
-      const details = [...Value.Errors(schema, data)].map((e) => ({
-        field:   e.path,
-        message: e.message,
-      }));
-      return next(DomainError.validation('Validation failed', details));
-    }
-    req[source] = Value.Cast(schema, data);
-    next();
-  };
-}
-
-module.exports = { validate };
-EOF
-
-# ── DTO/index.js ─────────────────────────────────────────────
-cat > "$DEST/DTO/index.js" << EOF
-'use strict';
+// ── Exports ───────────────────────────────────────────────────────────────────
 
 module.exports = {
-  ...require('./create.dto'),
-  ...require('./update.dto'),
-  ...require('./param.dto'),
-  ...require('./query.dto'),
-  validate: require('./validate').validate,
+  CreateStoreDto,
+  UpdateStoreDto,
+  StoreParamDto,
+  StoreListQueryDto,
+  StoreResponseDto,
 };
+
 EOF
 
 # ── models/<name>.model.js ───────────────────────────────────
@@ -1892,61 +1856,9 @@ const QUERIES = {
 module.exports = { QUERIES };
 EOF
 
-# ── repository/<name>.repository.js ─────────────────────────
-cat > "$DEST/repository/${LOWER}.repository.js" << EOF
-'use strict';
-
-const { ${PASCAL} }   = require('../models');
-const { QUERIES }     = require('./queries');
-const { DomainError } = require('../../../shared/errors/domainError');
-const { now }         = require('../../../shared/utils/time');
-
-class ${PASCAL}Repository {
-  /** @param {{ query: Function }} db  pg pool wrapper */
-  constructor(db) {
-    this._db = db;
-  }
-
-  async findById(id) {
-    const res = await this._db.query(QUERIES.FIND_BY_ID, [id]);
-    if (!res.rows.length) throw DomainError.notFound('${PASCAL} not found');
-    return ${PASCAL}.fromRecord(res.rows[0]);
-  }
-
-  async findAll({ limit, offset }) {
-    const res = await this._db.query(QUERIES.FIND_ALL, [limit, offset]);
-    return res.rows.map((r) => ${PASCAL}.fromRecord(r));
-  }
-
-  async count() {
-    const res = await this._db.query(QUERIES.COUNT);
-    return res.rows[0].total;
-  }
-
-  async create(entity) {
-    const r   = entity.toRecord();
-    const res = await this._db.query(QUERIES.CREATE, [r.id, r.name, r.created_at, r.updated_at]);
-    return ${PASCAL}.fromRecord(res.rows[0]);
-  }
-
-  async update(id, { name = null }) {
-    const res = await this._db.query(QUERIES.UPDATE, [name, now(), id]);
-    if (!res.rows.length) throw DomainError.notFound('${PASCAL} not found');
-    return ${PASCAL}.fromRecord(res.rows[0]);
-  }
-
-  async delete(id) {
-    await this._db.query(QUERIES.DELETE, [id]);
-  }
-}
-
-module.exports = { ${PASCAL}Repository };
-EOF
-
 cat > "$DEST/repository/index.js" << EOF
 'use strict';
 module.exports = {
-  ...require('./${LOWER}.repository'),
   QUERIES: require('./queries').QUERIES,
 };
 EOF
@@ -2010,50 +1922,56 @@ module.exports = require('./${LOWER}.service');
 EOF
 
 # ── controller/<name>.controller.js ─────────────────────────
+# No container import — service is injected by the router factory.
 cat > "$DEST/controller/${LOWER}.controller.js" << EOF
 'use strict';
 
 const { ok, created, noContent, paginated } = require('../../../http/response');
-const { container } = require('../../../app/container');
 
-function getService() {
-  return container.resolve('${LOWER}Service');
+/**
+ * Build a ${PASCAL} controller bound to the provided service.
+ * The controller has zero knowledge of the DI container.
+ *
+ * @param {import('../service').${PASCAL}Service} ${LOWER}Service
+ */
+function makeController(${LOWER}Service) {
+  async function create(req, res, next) {
+    try {
+      return created(res, await ${LOWER}Service.create(req.body));
+    } catch (err) { next(err); }
+  }
+
+  async function getById(req, res, next) {
+    try {
+      return ok(res, await ${LOWER}Service.getById(req.params.id));
+    } catch (err) { next(err); }
+  }
+
+  async function list(req, res, next) {
+    try {
+      const page  = Number(req.query.page  || 1);
+      const limit = Number(req.query.limit || 20);
+      return paginated(res, await ${LOWER}Service.list({ page, limit }));
+    } catch (err) { next(err); }
+  }
+
+  async function update(req, res, next) {
+    try {
+      return ok(res, await ${LOWER}Service.update(req.params.id, req.body));
+    } catch (err) { next(err); }
+  }
+
+  async function remove(req, res, next) {
+    try {
+      await ${LOWER}Service.delete(req.params.id);
+      return noContent(res);
+    } catch (err) { next(err); }
+  }
+
+  return { create, getById, list, update, remove };
 }
 
-async function create(req, res, next) {
-  try {
-    return created(res, await getService().create(req.body));
-  } catch (err) { next(err); }
-}
-
-async function getById(req, res, next) {
-  try {
-    return ok(res, await getService().getById(req.params.id));
-  } catch (err) { next(err); }
-}
-
-async function list(req, res, next) {
-  try {
-    const page  = Number(req.query.page  || 1);
-    const limit = Number(req.query.limit || 20);
-    return paginated(res, await getService().list({ page, limit }));
-  } catch (err) { next(err); }
-}
-
-async function update(req, res, next) {
-  try {
-    return ok(res, await getService().update(req.params.id, req.body));
-  } catch (err) { next(err); }
-}
-
-async function remove(req, res, next) {
-  try {
-    await getService().delete(req.params.id);
-    return noContent(res);
-  } catch (err) { next(err); }
-}
-
-module.exports = { create, getById, list, update, remove };
+module.exports = { makeController };
 EOF
 
 cat > "$DEST/controller/index.js" << EOF
@@ -2096,13 +2014,15 @@ module.exports = require('./${LOWER}.middleware');
 EOF
 
 # ── router/index.js ──────────────────────────────────────────
+# Exports createRouter(service) — a factory, not a pre-wired instance.
+# The composition root (bootstrap/router.js) calls it with the resolved service.
 cat > "$DEST/router/index.js" << EOF
 'use strict';
 
-const { Router }         = require('express');
-const ctrl               = require('../controller');
-const { validate }       = require('../DTO/validate');
-const { authMiddleware } = require('../../../http/middlewares');
+const { Router }           = require('express');
+const { makeController }   = require('../controller');
+const { validate }         = require('../DTO/validate');
+const { authMiddleware }   = require('../../../http/middlewares');
 const {
   Create${PASCAL}Dto,
   Update${PASCAL}Dto,
@@ -2110,34 +2030,45 @@ const {
   ${PASCAL}ListQueryDto,
 } = require('../DTO');
 
-const router = Router();
+/**
+ * Create the ${PASCAL} Express router.
+ *
+ * @param {import('../service').${PASCAL}Service} ${LOWER}Service
+ * @returns {import('express').Router}
+ */
+function createRouter(${LOWER}Service) {
+  const ctrl   = makeController(${LOWER}Service);
+  const router = Router();
 
-// ── Public ───────────────────────────────────────────────────
-router.post('/',
-  validate(Create${PASCAL}Dto, 'body'),
-  ctrl.create);
+  // ── Public ───────────────────────────────────────────────────
+  router.post('/',
+    validate(Create${PASCAL}Dto, 'body'),
+    ctrl.create);
 
-// ── Protected ────────────────────────────────────────────────
-router.use(authMiddleware);
+  // ── Protected ────────────────────────────────────────────────
+  router.use(authMiddleware);
 
-router.get('/',
-  validate(${PASCAL}ListQueryDto, 'query'),
-  ctrl.list);
+  router.get('/',
+    validate(${PASCAL}ListQueryDto, 'query'),
+    ctrl.list);
 
-router.get('/:id',
-  validate(${PASCAL}ParamDto, 'params'),
-  ctrl.getById);
+  router.get('/:id',
+    validate(${PASCAL}ParamDto, 'params'),
+    ctrl.getById);
 
-router.patch('/:id',
-  validate(${PASCAL}ParamDto, 'params'),
-  validate(Update${PASCAL}Dto, 'body'),
-  ctrl.update);
+  router.patch('/:id',
+    validate(${PASCAL}ParamDto, 'params'),
+    validate(Update${PASCAL}Dto, 'body'),
+    ctrl.update);
 
-router.delete('/:id',
-  validate(${PASCAL}ParamDto, 'params'),
-  ctrl.remove);
+  router.delete('/:id',
+    validate(${PASCAL}ParamDto, 'params'),
+    ctrl.remove);
 
-module.exports = router;
+  return router;
+}
+
+module.exports = { createRouter };
 EOF
 MAKER_EOF
 
